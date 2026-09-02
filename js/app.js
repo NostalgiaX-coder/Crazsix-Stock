@@ -657,7 +657,7 @@ function render(){
     <header>
       <div class="clay header-clay">
         <p class="eyebrow">ระบบจัดการร้าน · เปิดอ่านได้ทุกอุปกรณ์</p>
-        <h1>Crazsix Store</h1>
+        <img class="brand-logo" src="./assets/crazsix-logo-banner.png" alt="Crazsix Store">
         <p class="subline">สต็อกคงเหลือ ${totalItems} ตัวเลือก (${products.length} สินค้า) · ข้อมูลบันทึกอัตโนมัติ และเห็นเหมือนกันทุกเครื่องที่เปิดหน้านี้</p>
         <div class="stats">
           <div class="stat clay"><div class="lbl">มูลค่าสต็อก (ต้นทุน)</div><div class="val">${fmtMoney(stockValue())}</div></div>

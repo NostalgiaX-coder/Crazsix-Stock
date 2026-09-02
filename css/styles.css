@@ -59,6 +59,12 @@
     font-weight:700; font-size: clamp(28px, 4vw, 40px);
     color: var(--navy); margin:0 0 4px; letter-spacing:-0.01em;
   }
+  .brand-logo{
+    display:block;
+    width:min(300px, 72vw);
+    height:auto;
+    margin:-10px 0 -8px -10px;
+  }
   .subline{ color: var(--ink-soft); font-size:13.5px; margin:0; }
 
   .stats{ display:grid; grid-template-columns: repeat(4,1fr); gap:14px; margin-top:20px; }
