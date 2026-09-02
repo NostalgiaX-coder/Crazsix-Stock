@@ -119,25 +119,16 @@ async function loadAll(){
     return;
   }
   try{
-    try{
-      products = await stockDatabase.get('products');
-    }catch(e){ products = null; }
+    products = await stockDatabase.get('products');
 
     if(products === null){
-      // try migrating from old flat v1 format
-      try{
-        products = [];
-      }catch(e){ products = []; }
+      products = [];
     }
     if(!Array.isArray(products)) products = [];
 
-    try{
-      transactions = await stockDatabase.get('transactions') || [];
-    }catch(e){ transactions = []; }
+    transactions = await stockDatabase.get('transactions') || [];
 
-    try{
-      pendingOrders = await stockDatabase.get('pendingOrders') || [];
-    }catch(e){ pendingOrders = []; }
+    pendingOrders = await stockDatabase.get('pendingOrders') || [];
     if(!Array.isArray(pendingOrders)) pendingOrders = [];
 
     loaded = true;

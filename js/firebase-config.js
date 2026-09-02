@@ -1,6 +1,6 @@
 // คัดลอกค่าจาก Firebase Console > Project settings > Your apps > Web app
 // ค่าเหล่านี้ระบุตัวโปรเจกต์ได้ แต่ไม่ได้เป็นรหัสลับ จึงวางไว้ฝั่งเว็บได้
-const firebaseConfig = {
+export const firebaseConfig = {
   apiKey: "AIzaSyDXdSpL_Qcbdx31Eif0bP8fDI0Yy0y6K08",
   authDomain: "crazsix-stock.firebaseapp.com",
   projectId: "crazsix-stock",

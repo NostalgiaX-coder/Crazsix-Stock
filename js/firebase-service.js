@@ -12,6 +12,14 @@ export { isConfigured as firebaseConfigured };
 
 let db;
 
+function withTimeout(promise, operation) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${operation} ใช้เวลานานเกิน 15 วินาที`)), 15000);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 function database() {
   if (!isConfigured) {
     throw new Error('ยังไม่ได้ตั้งค่า Firebase: แก้ไฟล์ js/firebase-config.js ก่อนใช้งาน');
@@ -30,7 +38,7 @@ function documentRef(name) {
  */
 export const stockDatabase = {
   async get(name) {
-    const snapshot = await getDoc(documentRef(name));
+    const snapshot = await withTimeout(getDoc(documentRef(name)), 'การเชื่อมต่อ Firebase');
     return snapshot.exists() ? snapshot.data().value : null;
   },
 
