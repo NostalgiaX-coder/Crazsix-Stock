@@ -1,12 +1,13 @@
 // คัดลอกค่าจาก Firebase Console > Project settings > Your apps > Web app
 // ค่าเหล่านี้ระบุตัวโปรเจกต์ได้ แต่ไม่ได้เป็นรหัสลับ จึงวางไว้ฝั่งเว็บได้
-export const firebaseConfig = {
-  apiKey: 'PASTE_YOUR_API_KEY',
-  authDomain: 'PASTE_YOUR_PROJECT.firebaseapp.com',
-  projectId: 'PASTE_YOUR_PROJECT_ID',
-  storageBucket: 'PASTE_YOUR_PROJECT.firebasestorage.app',
-  messagingSenderId: 'PASTE_YOUR_MESSAGING_SENDER_ID',
-  appId: 'PASTE_YOUR_APP_ID'
+const firebaseConfig = {
+  apiKey: "AIzaSyDXdSpL_Qcbdx31Eif0bP8fDI0Yy0y6K08",
+  authDomain: "crazsix-stock.firebaseapp.com",
+  projectId: "crazsix-stock",
+  storageBucket: "crazsix-stock.firebasestorage.app",
+  messagingSenderId: "397141289819",
+  appId: "1:397141289819:web:c5bb8338d6e21f1e31487e",
+  measurementId: "G-K3FJ71DZ8B"
 };
 
 // เปลี่ยนค่านี้เมื่อต้องการแยกข้อมูลของคนละร้านใน Firebase โปรเจกต์เดียวกัน
