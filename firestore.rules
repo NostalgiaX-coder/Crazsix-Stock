@@ -1,0 +1,11 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // เริ่มต้นแบบชั่วคราวเพื่อให้ทดสอบได้เท่านั้น
+    // ก่อนเปิดใช้จริง ให้เปลี่ยนเป็นอนุญาตเฉพาะผู้ใช้ที่ล็อกอินแล้ว
+    match /stores/{storeId}/data/{documentId} {
+      allow read, write: if true;
+    }
+  }
+}
