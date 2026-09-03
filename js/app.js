@@ -1106,7 +1106,7 @@ function renderStockTab(){
   return `
     <div class="panel">
       <h2>เพิ่มสินค้าเข้าสต็อก</h2>
-      <form id="add-product-form">
+      <form id="add-product-form" novalidate>
         <div class="type-toggle" id="mode-toggle" style="max-width:520px; margin-bottom:16px;">
           <label><input type="radio" name="mode" value="new" checked><span>เพิ่มสินค้า/ตัวเลือกใหม่</span></label>
           <label><input type="radio" name="mode" value="restock" ${allVariants().length===0?'disabled':''}><span>เติมสต็อกตัวที่มีอยู่</span></label>
