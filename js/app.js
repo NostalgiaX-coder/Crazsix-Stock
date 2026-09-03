@@ -297,18 +297,45 @@ function last6MonthsKeys(){
 function addVariantCore(data){
   const key = data.name.trim().toLowerCase();
   let prod = products.find(p=>p.name.trim().toLowerCase()===key);
-  const variant = {
-    id: uid(), color: data.color, size: data.size, type: data.type,
-    cost: data.cost, price: data.price, qty: data.qty, createdAt: todayStr()
-  };
+  const color = (data.color||'').trim();
+  const size = (data.size||'').trim();
+  const type = data.type;
+
   if(prod){
+    // หาตัวเลือกเดิมที่ สี/ไซส์/ประเภท ตรงกันทั้งหมด
+    const existing = prod.variants.find(v =>
+      (v.color||'').trim().toLowerCase() === color.toLowerCase() &&
+      (v.size||'').trim().toLowerCase() === size.toLowerCase() &&
+      v.type === type
+    );
+    if(existing){
+      // เจอตัวเลือกเดิม -> บวกจำนวนเข้าไป และเฉลี่ยต้นทุนถ่วงน้ำหนัก
+      const totalOldValue = existing.qty * existing.cost;
+      const totalNewValue = data.qty * data.cost;
+      const newQty = existing.qty + data.qty;
+      existing.cost = newQty > 0 ? (totalOldValue + totalNewValue) / newQty : data.cost;
+      existing.qty = newQty;
+      existing.price = data.price;
+      if(data.image) prod.image = data.image;
+      return {prod, variant: existing};
+    }
+    // ไม่เจอตัวเลือกเดิม -> สร้างตัวเลือกใหม่ตามปกติ
+    const variant = {
+      id: uid(), color, size, type,
+      cost: data.cost, price: data.price, qty: data.qty, createdAt: todayStr()
+    };
     prod.variants.unshift(variant);
     if(data.image) prod.image = data.image;
-  }else{
-    prod = { id: uid(), name: data.name.trim(), image: data.image||null, createdAt: todayStr(), variants:[variant] };
+    return {prod, variant};
+  } else {
+    const variant = {
+      id: uid(), color, size, type,
+      cost: data.cost, price: data.price, qty: data.qty, createdAt: todayStr()
+    };
+    prod = { id: uid(), name: data.name.trim(), image: data.image||null, createdAt: todayStr(), variants: [variant] };
     products.unshift(prod);
+    return {prod, variant};
   }
-  return {prod, variant};
 }
 
 async function addProductOrVariant(data){
