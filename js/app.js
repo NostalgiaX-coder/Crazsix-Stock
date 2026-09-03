@@ -227,9 +227,8 @@ function stockColorGroups(){
   const groups = new Map();
   allVariants().forEach(({product, variant}) => {
     const key = normalizedText(product.name) + '|' + normalizedText(variant.color);
-    if(!groups.has(key)) groups.set(key, {name: product.name, color: variant.color || '-', image: product.image, variants: []});
+    if(!groups.has(key)) groups.set(key, {name: product.name, color: variant.color || '-', image: productColorImage(product, variant.color), variants: []});
     const group = groups.get(key);
-    if(!group.image && product.image) group.image = product.image;
     group.variants.push({product, variant});
   });
   return [...groups.values()];
@@ -238,9 +237,8 @@ function saleProductGroups(){
   const groups = new Map();
   allVariants().filter(({variant}) => variant.qty > 0).forEach(({product, variant}) => {
     const key = normalizedText(product.name);
-    if(!groups.has(key)) groups.set(key, {name: product.name, image: product.image, variants: []});
+    if(!groups.has(key)) groups.set(key, {name: product.name, image: productColorImage(product, variant.color), variants: []});
     const group = groups.get(key);
-    if(!group.image && product.image) group.image = product.image;
     group.variants.push({product, variant});
   });
   return [...groups.values()];
@@ -273,6 +271,17 @@ function variantLabel(product, variant){
   if(variant.size) parts.push('ไซส์ ' + variant.size);
   parts.push(variant.type==='used' ? 'มือ2' : 'มือ1');
   return parts.join(' · ');
+}
+function productColorImage(product, color){
+  const key = normalizedText(color);
+  if(product.colorImages && product.colorImages[key]) return product.colorImages[key];
+  return product.image || null;
+}
+function setProductColorImage(prod, color, image){
+  if(!image) return;
+  prod.colorImages = prod.colorImages || {};
+  prod.colorImages[normalizedText(color)] = image;
+  if(!prod.image) prod.image = image;
 }
 function stockValue(){
   return allVariants().reduce((s,{variant})=> s + variant.cost*variant.qty, 0);
@@ -353,7 +362,7 @@ function addVariantCore(data){
       existing.cost = newQty > 0 ? (totalOldValue + totalNewValue) / newQty : data.cost;
       existing.qty = newQty;
       existing.price = data.price;
-      if(data.image) prod.image = data.image;
+      setProductColorImage(prod, color, data.image);
       return {prod, variant: existing};
     }
     // ไม่เจอตัวเลือกเดิม -> สร้างตัวเลือกใหม่ตามปกติ
@@ -362,14 +371,15 @@ function addVariantCore(data){
       cost: data.cost, price: data.price, qty: data.qty, createdAt: todayStr()
     };
     prod.variants.unshift(variant);
-    if(data.image) prod.image = data.image;
+    setProductColorImage(prod, color, data.image);
     return {prod, variant};
   } else {
     const variant = {
       id: uid(), color, size, type,
       cost: data.cost, price: data.price, qty: data.qty, createdAt: todayStr()
     };
-    prod = { id: uid(), name: data.name.trim(), image: data.image||null, createdAt: todayStr(), variants: [variant] };
+    prod = { id: uid(), name: data.name.trim(), image: null, colorImages: {}, createdAt: todayStr(), variants: [variant] };
+    setProductColorImage(prod, color, data.image);
     products.unshift(prod);
     return {prod, variant};
   }
@@ -616,7 +626,7 @@ async function editVariant(variantId, data){
   if(!found) return;
   const {product, variant} = found;
   product.name = data.name.trim();
-  if(data.image) product.image = data.image;
+  setProductColorImage(product, data.color, data.image);
   variant.color = data.color;
   variant.size = data.size;
   variant.type = data.type;
