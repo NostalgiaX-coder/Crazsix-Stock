@@ -158,15 +158,15 @@ function subscribeToStoreChanges(){
 
 async function saveProducts(){
   try{ await stockDatabase.set('products', products); }
-  catch(e){ console.error('save products failed', e); showAlert('บันทึกข้อมูลสินค้าไม่สำเร็จ ลองอีกครั้ง'); }
+  catch(e){ console.error('save products failed', e); throw e; }
 }
 async function saveTx(){
   try{ await stockDatabase.set('transactions', transactions); }
-  catch(e){ console.error('save tx failed', e); showAlert('บันทึกรายการบัญชีไม่สำเร็จ ลองอีกครั้ง'); }
+  catch(e){ console.error('save tx failed', e); throw e; }
 }
 async function savePending(){
   try{ await stockDatabase.set('pendingOrders', pendingOrders); }
-  catch(e){ console.error('save pending failed', e); showAlert('บันทึกรายการรอรับของไม่สำเร็จ ลองอีกครั้ง'); }
+  catch(e){ console.error('save pending failed', e); throw e; }
 }
 
 // ---------- Backup export / import ----------
@@ -752,14 +752,15 @@ function resizeImageFile(file){
       const img = new Image();
       img.onerror = reject;
       img.onload = ()=>{
-        const maxDim = 320;
+        // เก็บรูปขนาดเล็กเพื่อไม่ให้เอกสาร Firestore ใหญ่เกินขีดจำกัด
+        const maxDim = 200;
         let w = img.width, h = img.height;
         if(w > h && w > maxDim){ h = Math.round(h * maxDim/w); w = maxDim; }
         else if(h > maxDim){ w = Math.round(w * maxDim/h); h = maxDim; }
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
         canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL('image/jpeg', 0.72));
+        resolve(canvas.toDataURL('image/jpeg', 0.6));
       };
       img.src = reader.result;
     };
@@ -1454,6 +1455,11 @@ function wireStockTab(){
 
   if(f) f.onsubmit = async (e)=>{
     e.preventDefault();
+    if(submitBtn.dataset.saving === 'true') return;
+    const originalSubmitText = submitBtn.textContent;
+    submitBtn.dataset.saving = 'true';
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'กำลังบันทึก...';
     try{
     const fd = new FormData(f);
     const mode = fd.get('mode');
@@ -1573,7 +1579,12 @@ function wireStockTab(){
     }
     }catch(err){
       console.error('add-product-form submit failed', err);
-      showAlert('เกิดข้อผิดพลาดที่ไม่คาดคิด: ' + (err && err.message ? err.message : err));
+      const message = err && err.message ? err.message : 'ไม่สามารถบันทึกข้อมูลได้';
+      showAlert('บันทึกสินค้าไม่สำเร็จ: ' + message);
+    }finally{
+      submitBtn.dataset.saving = 'false';
+      submitBtn.disabled = false;
+      submitBtn.textContent = originalSubmitText;
     }
   };
   document.querySelectorAll('[data-del]').forEach(btn=>{
