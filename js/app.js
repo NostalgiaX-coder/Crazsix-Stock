@@ -24,6 +24,7 @@ const LOW_STOCK_THRESHOLD = 1;
 const app = document.getElementById('app');
 const fmtMoney = n => '฿' + Number(n||0).toLocaleString('th-TH', {maximumFractionDigits:2});
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+const normalizedText = value => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 const todayStr = () => new Date().toISOString().slice(0,10);
 const monthKey = d => d.slice(0,7);
 const monthLabel = key => {
@@ -222,6 +223,43 @@ function allVariants(){
   products.forEach(prod=> prod.variants.forEach(v=> list.push({product:prod, variant:v})));
   return list;
 }
+function stockColorGroups(){
+  const groups = new Map();
+  allVariants().forEach(({product, variant}) => {
+    const key = normalizedText(product.name) + '|' + normalizedText(variant.color);
+    if(!groups.has(key)) groups.set(key, {name: product.name, color: variant.color || '-', image: product.image, variants: []});
+    const group = groups.get(key);
+    if(!group.image && product.image) group.image = product.image;
+    group.variants.push({product, variant});
+  });
+  return [...groups.values()];
+}
+function saleProductGroups(){
+  const groups = new Map();
+  allVariants().filter(({variant}) => variant.qty > 0).forEach(({product, variant}) => {
+    const key = normalizedText(product.name);
+    if(!groups.has(key)) groups.set(key, {name: product.name, image: product.image, variants: []});
+    const group = groups.get(key);
+    if(!group.image && product.image) group.image = product.image;
+    group.variants.push({product, variant});
+  });
+  return [...groups.values()];
+}
+function compareSizes(a, b){
+  const order = ['xxs', 'xs', 's', 'm', 'l', 'xl', 'xxl', 'xxxl', '4xl', '5xl'];
+  const left = normalizedText(a);
+  const right = normalizedText(b);
+  if(!left || !right) return !left && !right ? 0 : (!left ? 1 : -1);
+  const leftRank = order.indexOf(left);
+  const rightRank = order.indexOf(right);
+  if(leftRank !== -1 || rightRank !== -1){
+    return (leftRank === -1 ? 999 : leftRank) - (rightRank === -1 ? 999 : rightRank);
+  }
+  const leftNumber = Number(left);
+  const rightNumber = Number(right);
+  if(!Number.isNaN(leftNumber) && !Number.isNaN(rightNumber)) return leftNumber - rightNumber;
+  return String(a || '').localeCompare(String(b || ''), undefined, {numeric:true, sensitivity:'base'});
+}
 function findVariant(variantId){
   for(const prod of products){
     const v = prod.variants.find(x=>x.id===variantId);
@@ -295,18 +333,17 @@ function last6MonthsKeys(){
 
 // ---------- Actions ----------
 function addVariantCore(data){
-  const key = data.name.trim().toLowerCase();
-  let prod = products.find(p=>p.name.trim().toLowerCase()===key);
+  const key = normalizedText(data.name);
+  let prod = products.find(p=>normalizedText(p.name)===key);
   const color = (data.color||'').trim();
   const size = (data.size||'').trim();
   const type = data.type;
 
   if(prod){
-    // หาตัวเลือกเดิมที่ สี/ไซส์/ประเภท ตรงกันทั้งหมด
+    // สีและไซส์เป็นตัวระบุของตัวเลือกเดียวกัน เพื่อไม่ให้สร้างแถวซ้ำ
     const existing = prod.variants.find(v =>
-      (v.color||'').trim().toLowerCase() === color.toLowerCase() &&
-      (v.size||'').trim().toLowerCase() === size.toLowerCase() &&
-      v.type === type
+      normalizedText(v.color) === normalizedText(color) &&
+      normalizedText(v.size) === normalizedText(size)
     );
     if(existing){
       // เจอตัวเลือกเดิม -> บวกจำนวนเข้าไป และเฉลี่ยต้นทุนถ่วงน้ำหนัก
@@ -365,19 +402,23 @@ async function addProductOrVariant(data){
 
 // base: {name,color,type,price,image,logExpense,shippingIn}; rows: [{size,qty,cost}]
 async function addProductBatch(base, rows){
-  const created = rows.map(r => addVariantCore({
-    name: base.name, color: r.color, size: r.size, type: base.type,
-    cost: r.cost, price: base.price, qty: r.qty, image: base.image
+  const created = rows.map(r => ({
+    ...addVariantCore({
+      name: base.name, color: r.color, size: r.size, type: base.type,
+      cost: r.cost, price: base.price, qty: r.qty, image: base.image
+    }),
+    addedQty: r.qty,
+    batchCost: r.cost
   }));
   await saveProducts();
   let txAdded = false;
   if(base.logExpense){
-    created.forEach(({prod, variant})=>{
-      if(variant.cost*variant.qty > 0){
+    created.forEach(({prod, variant, addedQty, batchCost})=>{
+      if(batchCost*addedQty > 0){
         transactions.unshift({
           id: uid(), type:'expense', category:'ซื้อสินค้าเข้าสต็อก',
           desc: variantLabel(prod, variant),
-          amount: variant.cost*variant.qty, date: todayStr(), productId: variant.id
+          amount: batchCost*addedQty, date: todayStr(), productId: variant.id
         });
         txAdded = true;
       }
@@ -407,6 +448,60 @@ async function attachShippingBulk(items, amount, date){
   });
   await saveTx();
   render();
+}
+
+function duplicateMergePreview(){
+  const variants = allVariants();
+  const productKeys = new Set(products.map(p => normalizedText(p.name)));
+  const variantKeys = new Set(variants.map(({product, variant}) => normalizedText(product.name) + '|' + normalizedText(variant.color) + '|' + normalizedText(variant.size)));
+  return {duplicateProducts: products.length - productKeys.size, duplicateVariants: variants.length - variantKeys.size};
+}
+
+async function mergeDuplicateData(){
+  const mergedProducts = new Map();
+  const idMap = new Map();
+  let mergedVariants = 0;
+  products.forEach(product => {
+    const productKey = normalizedText(product.name);
+    if(!mergedProducts.has(productKey)) mergedProducts.set(productKey, {
+      id: product.id, name: product.name.trim(), image: product.image || null,
+      createdAt: product.createdAt || todayStr(), variants: []
+    });
+    const target = mergedProducts.get(productKey);
+    if(!target.image && product.image) target.image = product.image;
+    product.variants.forEach(source => {
+      const variantKey = normalizedText(source.color) + '|' + normalizedText(source.size);
+      let targetVariant = target.variants.find(v => v._mergeKey === variantKey);
+      if(!targetVariant){
+        targetVariant = {...source, _mergeKey: variantKey};
+        target.variants.push(targetVariant);
+        return;
+      }
+      const oldQty = Number(targetVariant.qty) || 0;
+      const addQty = Number(source.qty) || 0;
+      const totalQty = oldQty + addQty;
+      const oldValue = oldQty * (Number(targetVariant.cost) || 0);
+      const addValue = addQty * (Number(source.cost) || 0);
+      targetVariant.cost = totalQty > 0 ? (oldValue + addValue) / totalQty : Math.max(Number(targetVariant.cost) || 0, Number(source.cost) || 0);
+      targetVariant.qty = totalQty;
+      if(source.price != null) targetVariant.price = Number(source.price) || 0;
+      idMap.set(source.id, targetVariant.id);
+      mergedVariants++;
+    });
+  });
+  if(mergedVariants === 0 && mergedProducts.size === products.length) return null;
+  products = [...mergedProducts.values()].map(product => ({
+    ...product, variants: product.variants.map(({_mergeKey, ...variant}) => variant)
+  }));
+  transactions = transactions.map(tx => ({
+    ...tx,
+    productId: idMap.get(tx.productId) || tx.productId,
+    items: Array.isArray(tx.items) ? tx.items.map(item => ({...item, productId: idMap.get(item.productId) || item.productId})) : tx.items
+  }));
+  await saveProducts();
+  await saveTx();
+  render();
+  return mergedVariants;
 }
 
 // ---------- Pending orders (paid for, not yet physically received) ----------
@@ -474,37 +569,41 @@ async function deletePendingOrder(pendingId){
   render();
 }
 
-async function restockVariant(variantId, data){
-  const found = findVariant(variantId);
-  if(!found) return;
-  const {product, variant} = found;
-  const addQty = data.qty;
-  let batchCost = variant.cost;
-  if(data.cost != null && !isNaN(data.cost)){
-    batchCost = data.cost;
+// เติมหลายตัวในล็อตเดียว โดยคิดต้นทุนเฉลี่ยถ่วงน้ำหนักให้แต่ละตัวเลือก
+async function restockVariants(rows, data){
+  const updated = [];
+  rows.forEach(row => {
+    const found = findVariant(row.variantId);
+    if(!found) return;
+    const {product, variant} = found;
     const totalOldValue = variant.qty * variant.cost;
-    const totalNewValue = addQty * data.cost;
-    const newQty = variant.qty + addQty;
-    variant.cost = newQty>0 ? (totalOldValue + totalNewValue) / newQty : data.cost;
-  }
-  variant.qty += addQty;
-  if(data.price != null && !isNaN(data.price)) variant.price = data.price;
+    const newQty = variant.qty + row.qty;
+    variant.cost = newQty > 0 ? (totalOldValue + row.qty * row.cost) / newQty : row.cost;
+    variant.qty = newQty;
+    if(row.price != null && !isNaN(row.price)) variant.price = row.price;
+    updated.push({product, variant, qty: row.qty, batchCost: row.cost});
+  });
+  if(updated.length === 0) throw new Error('ไม่พบสินค้าที่เลือกสำหรับเติมสต๊อก');
   await saveProducts();
+
   let txAdded = false;
-  if(data.logExpense && batchCost*addQty > 0){
-    transactions.unshift({
-      id: uid(), type:'expense', category:'เติมสต็อกสินค้าเดิม',
-      desc: variantLabel(product, variant) + ' +' + addQty,
-      amount: batchCost*addQty, date: todayStr(), productId: variant.id
+  if(data.logExpense){
+    updated.forEach(({product, variant, qty, batchCost}) => {
+      if(batchCost * qty <= 0) return;
+      transactions.unshift({
+        id: uid(), type:'expense', category:'เติมสต๊อกสินค้าเดิม',
+        desc: variantLabel(product, variant) + ' +' + qty,
+        amount: batchCost * qty, date: todayStr(), productId: variant.id
+      });
+      txAdded = true;
     });
-    txAdded = true;
   }
-  const shippingIn = parseFloat(data.shippingIn)||0;
+  const shippingIn = parseFloat(data.shippingIn) || 0;
   if(shippingIn > 0){
     transactions.unshift({
       id: uid(), type:'expense', category:'ค่าส่งสินค้าเข้า',
-      desc: variantLabel(product, variant) + ' (ค่าส่งจากต้นทาง)',
-      amount: shippingIn, date: todayStr(), productId: variant.id
+      desc: updated.map(({product, variant, qty}) => variantLabel(product, variant) + ' x' + qty).join(', ') + ' (ค่าส่งจากต้นทาง)',
+      amount: shippingIn, date: todayStr(), productId: null
     });
     txAdded = true;
   }
@@ -710,7 +809,8 @@ function render(){
     <footer>
       <div class="footer-actions">
         <button id="export-btn">ดาวน์โหลดฐานข้อมูล (สำรอง)</button>
-        <label id="import-label" style="position:relative; cursor:pointer;">นำเข้าฐานข้อมูล<input type="file" id="import-input" accept="application/json" style="position:absolute; opacity:0; width:1px; height:1px; pointer-events:none;"></label>
+        <button type="button" id="import-btn">นำเข้าฐานข้อมูล</button>
+        <input type="file" id="import-input" accept=".json,application/json" hidden>
         <button id="reset-btn">ล้างข้อมูลทั้งหมด</button>
       </div>
     </footer>
@@ -722,8 +822,7 @@ function render(){
   document.getElementById('reset-btn').onclick = resetAll;
   document.getElementById('export-btn').onclick = exportData;
   document.getElementById('import-input').onchange = handleImportFile;
-  document.getElementById('import-label').onclick = (e)=>{
-    e.preventDefault();
+  document.getElementById('import-btn').onclick = ()=>{
     document.getElementById('import-input').click();
   };
 
@@ -750,12 +849,12 @@ function renderHomeTab(){
   const low = lowStockVariants();
   const q = stockSearch.trim().toLowerCase();
 
-  const groups = products.map(prod=>{
-    const variants = prod.variants.filter(v=>{
+  const groups = stockColorGroups().map(group=>{
+    const variants = group.variants.filter(({product, variant})=>{
       if(!q) return true;
-      return [prod.name, v.color, v.size].filter(Boolean).join(' ').toLowerCase().includes(q);
+      return [product.name, variant.color, variant.size].filter(Boolean).join(' ').toLowerCase().includes(q);
     });
-    return {prod, variants};
+    return {...group, variants};
   }).filter(g=>g.variants.length>0);
 
   const alertBlock = low.length===0 ? '' : `
@@ -776,13 +875,12 @@ function renderHomeTab(){
     </div>
   `;
 
-  const groupHtml = groups.map(({prod, variants})=>{
-    const totalQty = prod.variants.reduce((s,v)=>s+v.qty,0);
-    const rows = variants.map(v=>{
+  const groupHtml = groups.map(group=>{
+    const totalQty = group.variants.reduce((sum, {variant})=>sum + variant.qty, 0);
+    const rows = [...group.variants].sort((a,b)=>compareSizes(a.variant.size, b.variant.size)).map(({variant:v})=>{
       const isLow = v.type==='new' && v.qty>0 && v.qty<=LOW_STOCK_THRESHOLD;
       const parts = [];
       if(v.size) parts.push('ไซส์ '+escapeHtml(v.size));
-      if(v.color) parts.push(escapeHtml(v.color));
       parts.push(v.type==='used' ? 'มือ2' : 'มือ1');
       return `
         <div class="variant-row ${v.qty<=0?'out':''} ${isLow?'low':''}">
@@ -795,10 +893,9 @@ function renderHomeTab(){
     return `
       <div class="prod-group">
         <div class="prod-group-head">
-          <div class="thumb" style="width:44px;height:44px;">${prod.image ? `<img src="${prod.image}" alt="">` : '<span class="thumb-ph">👕</span>'}</div>
-          <div class="prod-group-name">${escapeHtml(prod.name)}</div>
+          <div class="thumb" style="width:44px;height:44px;">${group.image ? `<img src="${group.image}" alt="">` : '<span class="thumb-ph">👕</span>'}</div>
+          <div class="prod-group-name">${escapeHtml(group.name)} <span class="prod-group-color">· ${escapeHtml(group.color)}</span></div>
           <div class="prod-group-total">รวม ${totalQty} ชิ้น</div>
-          <button class="btn btn-gold btn-sm" data-aggstats="${prod.id}">สถิติรวม</button>
         </div>
         ${rows}
       </div>
@@ -831,9 +928,6 @@ function wireHomeTab(){
   }
   document.querySelectorAll('[data-stats]').forEach(btn=>{
     btn.onclick = ()=> openVariantDetail(btn.dataset.stats);
-  });
-  document.querySelectorAll('[data-aggstats]').forEach(btn=>{
-    btn.onclick = ()=> openProductAggDetail(btn.dataset.aggstats);
   });
 }
 
@@ -944,6 +1038,18 @@ document.getElementById('edit-form').onsubmit = async (e)=>{
 };
 
 // ---------- Stock tab ----------
+function restockRowTemplate(options){
+  return `
+    <div class="restock-row">
+      <select class="restock-variant">${options}</select>
+      <input type="number" class="restock-qty" min="1" value="1" placeholder="จำนวน">
+      <input type="number" class="restock-row-cost" min="0" step="0.01" placeholder="ต้นทุน/ชิ้น">
+      <input type="number" class="restock-row-price" min="0" step="0.01" placeholder="ราคาขาย (โน้ต)">
+      <button type="button" class="btn-danger remove-restock-row" style="display:none;">×</button>
+    </div>
+  `;
+}
+
 function pendingRowTemplate(idx){
   return `
     <div class="pending-row">
@@ -965,25 +1071,30 @@ function pendingRowTemplate(idx){
 }
 
 function renderStockTab(){
-  const rows = allVariants().map(({product:p, variant:v}) => `
-    <tr>
-      <td><div class="thumb-cell">
-        <div class="thumb">${p.image ? `<img src="${p.image}" alt="">` : '<span class="thumb-ph">👕</span>'}</div>
-      </div></td>
-      <td>${escapeHtml(p.name)}</td>
-      <td>${escapeHtml(v.size||'-')}</td>
-      <td>${escapeHtml(v.color||'-')}</td>
-      <td><span class="tag ${v.type}">${v.type==='new'?'มือ1':'มือ2'}</span></td>
-      <td class="num">${fmtMoney(v.cost)}</td>
-      <td class="num">${fmtMoney(v.price)}</td>
-      <td class="num">${v.qty}</td>
-      <td class="num">${fmtMoney(v.cost*v.qty)}</td>
-      <td style="white-space:nowrap;">
+  const rows = stockColorGroups().map(group => {
+    const totalQty = group.variants.reduce((sum, {variant}) => sum + variant.qty, 0);
+    const totalValue = group.variants.reduce((sum, {variant}) => sum + variant.cost * variant.qty, 0);
+    const averageCost = totalQty ? totalValue / totalQty : 0;
+    const sizeRows = group.variants.map(({variant:v}) => `
+      <div class="stock-size-item">
+        <span>ไซส์ ${escapeHtml(v.size||'-')} · ${v.type==='new'?'มือ1':'มือ2'} · ${v.qty} ชิ้น</span>
+        <span>${fmtMoney(v.cost)}</span>
         <button class="btn btn-ghost btn-sm" data-edit="${v.id}">แก้ไข</button>
         <button class="btn-danger" data-del="${v.id}">ลบ</button>
-      </td>
-    </tr>
-  `).join('');
+      </div>`).join('');
+    return `
+    <tr>
+      <td><div class="thumb-cell">
+        <div class="thumb">${group.image ? `<img src="${group.image}" alt="">` : '<span class="thumb-ph">👕</span>'}</div>
+      </div></td>
+      <td>${escapeHtml(group.name)}</td>
+      <td>${escapeHtml(group.color)}</td>
+      <td class="stock-size-list">${sizeRows}</td>
+      <td class="num">${totalQty}</td>
+      <td class="num">${fmtMoney(averageCost)}</td>
+      <td class="num">${fmtMoney(totalValue)}</td>
+    </tr>`;
+  }).join('');
 
   const productNameOptions = products.map(p => `<option value="${escapeHtml(p.name)}">`).join('');
 
@@ -1061,31 +1172,32 @@ function renderStockTab(){
         </div>
 
         <div id="restock-fields" class="form-grid" style="display:none;">
-          <div class="field" style="grid-column:span 2">
-            <label>เลือกสินค้าเดิม</label>
-            <select name="variantId">${variantOptions}</select>
+          <div class="field" style="grid-column:1/-1">
+            <label>รายการที่เติมสต๊อก (เลือกได้หลายสินค้า)</label>
+            <div class="restock-row restock-heading" aria-hidden="true"><span>สินค้า</span><span>จำนวน</span><span>ต้นทุน/ชิ้น</span><span>ราคาขาย (โน้ต)</span></div>
+            <div id="restock-rows">${restockRowTemplate(variantOptions)}</div>
+            <button type="button" class="btn btn-ghost btn-sm" id="add-restock-row" style="margin-top:4px;">+ เพิ่มสินค้าอีกตัว</button>
           </div>
           <div class="field">
-            <label>จำนวนที่เติม (ชิ้น)</label>
-            <input type="number" name="restockQty" min="1" value="1">
+            <label>วิธีคิดต้นทุน</label>
+            <div class="type-toggle" id="restock-cost-mode-toggle">
+              <label><input type="radio" name="restockCostMode" value="perunit" checked><span>รายชิ้น</span></label>
+              <label><input type="radio" name="restockCostMode" value="lump"><span>เหมาทั้งล็อต</span></label>
+            </div>
+          </div>
+          <div class="field" id="restock-lump-field" style="display:none;">
+            <label>ยอดต้นทุนทั้งล็อต (ทุกรายการรวมกัน)</label>
+            <input type="number" name="restockLumpCost" min="0" step="0.01">
           </div>
           <div class="field">
-            <label>ราคาต้นทุนล็อตนี้/ชิ้น</label>
-            <input type="number" name="restockCost" min="0" step="0.01">
-          </div>
-          <div class="field">
-            <label>ราคาที่ตั้งใจขาย/ชิ้น (โน้ต, แก้ไขได้)</label>
-            <input type="number" name="restockPrice" min="0" step="0.01">
-          </div>
-          <div class="field">
-            <label>ค่าส่งจากต้นทาง (ครั้งนี้)</label>
+            <label>ค่าส่งจากต้นทาง (ทั้งล็อต)</label>
             <input type="number" name="restockShippingIn" min="0" step="0.01" value="0">
           </div>
           <div class="checkline">
             <input type="checkbox" name="restockLogExpense" id="restockLogExpense" checked>
             <label for="restockLogExpense">บันทึกต้นทุนที่เติมเข้าเป็นรายจ่ายทันที</label>
           </div>
-          <p class="hint" style="grid-column:1/-1; margin:2px 0 0;">ถ้าต้นทุนล็อตนี้ไม่เท่าของเดิม ระบบจะคำนวณ "ต้นทุนเฉลี่ยถ่วงน้ำหนัก" ของสต็อกที่เหลือให้อัตโนมัติ ค่าส่งจะถูกบันทึกเป็นรายจ่ายแยกต่างหาก ไม่รวมในต้นทุนต่อชิ้น</p>
+          <p class="hint" style="grid-column:1/-1; margin:2px 0 0;">เลือกได้หลายตัวในครั้งเดียว: แบบรายชิ้นให้กรอกต้นทุนแต่ละแถว; แบบเหมาทั้งล็อตระบบจะหารต้นทุนเฉลี่ยตามจำนวนรวมให้เอง ค่าส่งจะบันทึกเป็นรายจ่ายแยกต่างหาก</p>
         </div>
 
         <div id="pending-fields" class="form-grid" style="display:none;">
@@ -1166,7 +1278,10 @@ function renderStockTab(){
     </div>
 
     <div class="panel">
-      <h2>รายการสินค้าในสต็อก</h2>
+      <div class="panel-title-action">
+        <div><h2>รายการสินค้าในสต็อก</h2><p class="hint">รวมรายการชื่อและสีเดียวกันไว้ในแถวเดียว เลือกแก้ไขรายไซส์ได้</p></div>
+        <button class="btn btn-ghost btn-sm" id="merge-data-btn">Merge ข้อมูลซ้ำ</button>
+      </div>
       ${allVariants().length===0 ? `
         <div class="empty">
           <div class="big">ยังไม่มีสินค้าในสต็อก</div>
@@ -1174,8 +1289,7 @@ function renderStockTab(){
         </div>` : `
         <table>
           <thead><tr>
-            <th></th><th>ชื่อสินค้า</th><th>ไซส์</th><th>สี</th><th>ประเภท</th><th class="num">ต้นทุน</th><th class="num">ราคาที่ตั้งใจขาย</th>
-            <th class="num">คงเหลือ</th><th class="num">มูลค่าคงเหลือ</th><th></th>
+            <th></th><th>ชื่อสินค้า</th><th>สี</th><th>ไซส์ / รายละเอียด</th><th class="num">คงเหลือรวม</th><th class="num">ต้นทุนเฉลี่ย</th><th class="num">มูลค่าคงเหลือ</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>`}
@@ -1190,18 +1304,6 @@ function wireStockTab(){
   const pendingFields = document.getElementById('pending-fields');
   const submitBtn = document.getElementById('add-product-submit');
   const modeToggle = document.getElementById('mode-toggle');
-  const restockSelect = f ? f.querySelector('[name="variantId"]') : null;
-  const restockCost = f ? f.querySelector('[name="restockCost"]') : null;
-  const restockPrice = f ? f.querySelector('[name="restockPrice"]') : null;
-
-  function syncRestockPrefill(){
-    if(!restockSelect) return;
-    const found = findVariant(restockSelect.value);
-    if(found){
-      restockCost.value = found.variant.cost;
-      restockPrice.value = found.variant.price;
-    }
-  }
 
   if(modeToggle){
     modeToggle.querySelectorAll('input[name="mode"]').forEach(r=>{
@@ -1211,18 +1313,54 @@ function wireStockTab(){
           restockFields.style.display = r.value==='restock' ? 'grid' : 'none';
           pendingFields.style.display = r.value==='pending' ? 'grid' : 'none';
           submitBtn.textContent = r.value==='restock' ? 'เติมสต็อก' : (r.value==='pending' ? 'บันทึกรายการสั่งซื้อ' : 'เพิ่มสินค้า');
-          if(r.value==='restock') syncRestockPrefill();
         }
       };
     });
     wireToggleLabels(modeToggle);
   }
-  if(restockSelect) restockSelect.onchange = syncRestockPrefill;
-  syncRestockPrefill();
-
   // robust click handling for all other type-toggle radio groups on this tab
   // (ประเภทสินค้า in new-item-fields / pending-fields, and cost-mode-toggle)
   document.querySelectorAll('#new-item-fields .type-toggle, #pending-fields .type-toggle, #cost-mode-toggle').forEach(wireToggleLabels);
+
+  // --- restock rows (multiple existing variants in one batch) ---
+  const restockRowsDiv = document.getElementById('restock-rows');
+  const restockOptions = document.querySelector('#restock-rows .restock-variant')?.innerHTML || '';
+  function syncRestockRow(row){
+    const found = findVariant(row.querySelector('.restock-variant').value);
+    if(!found) return;
+    row.querySelector('.restock-row-cost').value = found.variant.cost;
+    row.querySelector('.restock-row-price').value = found.variant.price;
+  }
+  function wireRestockRows(){
+    if(!restockRowsDiv) return;
+    const rows = restockRowsDiv.querySelectorAll('.restock-row');
+    rows.forEach(row => {
+      const remove = row.querySelector('.remove-restock-row');
+      remove.style.display = rows.length > 1 ? 'inline-flex' : 'none';
+      remove.onclick = ()=>{ row.remove(); wireRestockRows(); };
+      row.querySelector('.restock-variant').onchange = ()=>syncRestockRow(row);
+      syncRestockRow(row);
+    });
+  }
+  const addRestockRowBtn = document.getElementById('add-restock-row');
+  if(addRestockRowBtn) addRestockRowBtn.onclick = ()=>{
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = restockRowTemplate(restockOptions);
+    restockRowsDiv.appendChild(wrapper.firstElementChild);
+    wireRestockRows();
+  };
+  wireRestockRows();
+  const restockCostModeToggle = document.getElementById('restock-cost-mode-toggle');
+  const restockLumpField = document.getElementById('restock-lump-field');
+  if(restockCostModeToggle){
+    wireToggleLabels(restockCostModeToggle);
+    restockCostModeToggle.querySelectorAll('input[name="restockCostMode"]').forEach(r => r.onchange = ()=>{
+      if(!r.checked) return;
+      const isLump = r.value === 'lump';
+      restockLumpField.style.display = isLump ? 'flex' : 'none';
+      restockRowsDiv.classList.toggle('lump-mode', isLump);
+    });
+  }
 
   // --- size rows (add/remove) ---
   function wireRemoveButtons(){
@@ -1320,14 +1458,34 @@ function wireStockTab(){
     const fd = new FormData(f);
     const mode = fd.get('mode');
     if(mode==='restock'){
-      const variantId = fd.get('variantId');
-      if(!variantId){ showAlert('กรุณาเลือกสินค้าที่ต้องการเติมสต็อก'); return; }
-      const qty = parseInt(fd.get('restockQty'),10);
-      if(!qty || qty<1){ showAlert('ระบุจำนวนที่จะเติมให้ถูกต้อง'); return; }
-      restockVariant(variantId, {
-        qty,
-        cost: fd.get('restockCost') !== '' ? parseFloat(fd.get('restockCost')) : null,
-        price: fd.get('restockPrice') !== '' ? parseFloat(fd.get('restockPrice')) : null,
+      const costMode = fd.get('restockCostMode') || 'perunit';
+      const rows = [];
+      const selected = new Set();
+      let rowError = null;
+      document.querySelectorAll('#restock-rows .restock-row').forEach((row, i) => {
+        const variantId = row.querySelector('.restock-variant').value;
+        const qty = parseInt(row.querySelector('.restock-qty').value, 10);
+        const costValue = row.querySelector('.restock-row-cost').value;
+        const priceValue = row.querySelector('.restock-row-price').value;
+        if(!variantId || !qty || qty < 1){ rowError = 'ระบุสินค้าและจำนวนให้ถูกต้องในแถวที่ ' + (i+1); return; }
+        if(selected.has(variantId)){ rowError = 'เลือกสินค้าซ้ำในแถวที่ ' + (i+1) + ' กรุณารวมจำนวนไว้ในแถวเดียว'; return; }
+        selected.add(variantId);
+        const cost = parseFloat(costValue);
+        if(costMode === 'perunit' && (isNaN(cost) || cost < 0)){
+          rowError = 'กรุณาระบุต้นทุนต่อชิ้นในแถวที่ ' + (i+1); return;
+        }
+        const price = parseFloat(priceValue);
+        rows.push({variantId, qty, cost, price: isNaN(price) ? null : price});
+      });
+      if(rowError){ showAlert(rowError); return; }
+      if(rows.length === 0){ showAlert('กรุณาเลือกรายการที่จะเติมสต๊อกอย่างน้อย 1 รายการ'); return; }
+      if(costMode === 'lump'){
+        const lumpCost = parseFloat(fd.get('restockLumpCost'));
+        if(isNaN(lumpCost) || lumpCost < 0){ showAlert('กรุณาระบุยอดต้นทุนทั้งล็อตให้ถูกต้อง'); return; }
+        const totalQty = rows.reduce((sum, row) => sum + row.qty, 0);
+        rows.forEach(row => { row.cost = lumpCost / totalQty; });
+      }
+      await restockVariants(rows, {
         logExpense: fd.get('restockLogExpense') === 'on',
         shippingIn: parseFloat(fd.get('restockShippingIn'))||0
       });
@@ -1369,7 +1527,7 @@ function wireStockTab(){
         const unitCost = lumpTotal/totalQty;
         rows.forEach(r=> r.cost = unitCost);
       }
-      addPendingOrderBatch(rows, fd.get('pendingNote')||'');
+      await addPendingOrderBatch(rows, fd.get('pendingNote')||'');
     }else{
       const name = (fd.get('name')||'').trim();
       if(!name){ showAlert('กรุณาระบุชื่อสินค้า'); return; }
@@ -1411,7 +1569,7 @@ function wireStockTab(){
         shippingIn: parseFloat(fd.get('shippingIn'))||0
       };
       const rows = rowsRaw.map(r => ({ color: r.color, size: r.size, qty: r.qty, cost: unitCost }));
-      addProductBatch(base, rows);
+      await addProductBatch(base, rows);
     }
     }catch(err){
       console.error('add-product-form submit failed', err);
@@ -1424,6 +1582,23 @@ function wireStockTab(){
   document.querySelectorAll('[data-edit]').forEach(btn=>{
     btn.onclick = ()=> openEdit(btn.dataset.edit);
   });
+  const mergeButton = document.getElementById('merge-data-btn');
+  if(mergeButton) mergeButton.onclick = async ()=>{
+    const preview = duplicateMergePreview();
+    if(preview.duplicateProducts === 0 && preview.duplicateVariants === 0){
+      showAlert('ไม่พบข้อมูลชื่อสินค้า สี และไซส์ที่ซ้ำกัน');
+      return;
+    }
+    const message = `พบสินค้าชื่อซ้ำ ${preview.duplicateProducts} กลุ่ม และตัวเลือกสี/ไซส์ซ้ำ ${preview.duplicateVariants} รายการ\n\nต้องการรวมจำนวนและคำนวณต้นทุนเฉลี่ยถ่วงน้ำหนักใหม่หรือไม่?`;
+    if(!(await showConfirm(message))) return;
+    try{
+      const merged = await mergeDuplicateData();
+      showAlert(merged == null ? 'ไม่พบข้อมูลที่ต้องรวม' : `รวมข้อมูลสำเร็จ${merged ? ` (${merged} รายการตัวเลือก)` : ''}`);
+    }catch(err){
+      console.error('merge duplicate data failed', err);
+      showAlert('รวมข้อมูลไม่สำเร็จ กรุณาลองอีกครั้ง');
+    }
+  };
   document.querySelectorAll('[data-receive]').forEach(btn=>{
     btn.onclick = ()=>{
       const id = btn.dataset.receive;
@@ -1467,53 +1642,32 @@ function wireStockTab(){
 
 // ---------- Sell tab ----------
 function renderSellTab(){
-  const inStock = allVariants().filter(({variant})=>variant.qty>0);
-  const cards = inStock.map(({product:p, variant:v}) => `
-    <div class="sell-card">
-      <div class="sell-card-top">
-        <span class="tag ${v.type}">${v.type==='new'?'มือ1':'มือ2'}</span>
-        <span class="sell-stock">คงเหลือ ${v.qty}</span>
-      </div>
-      <div style="display:flex; gap:10px; align-items:flex-start;">
-        <div class="thumb" style="width:40px;height:40px;flex-shrink:0;">${p.image ? `<img src="${p.image}" alt="">` : '<span class="thumb-ph">👕</span>'}</div>
-        <div style="flex:1; min-width:0;">
-          <div class="sell-name">${escapeHtml(p.name)}${v.size ? ' <span class="sell-color">· ไซส์ '+escapeHtml(v.size)+'</span>' : ''}${v.color ? ' <span class="sell-color">· '+escapeHtml(v.color)+'</span>' : ''}</div>
-          <div class="sell-price">${fmtMoney(v.price)} <span class="sell-cost-note">โน้ตราคา (ต้นทุน ${fmtMoney(v.cost)})</span></div>
+  const groups = saleProductGroups();
+  const cards = groups.map((group, index) => {
+    const colors = [...new Set(group.variants.map(({variant}) => variant.color || '-'))];
+    const firstColor = colors[0];
+    const first = group.variants.find(({variant}) => (variant.color || '-') === firstColor).variant;
+    const colorOptions = colors.map(color => `<option value="${escapeHtml(color)}">${escapeHtml(color)}</option>`).join('');
+    const sizeOptions = group.variants.map(({variant}) => `<option value="${variant.id}" data-color="${escapeHtml(variant.color || '-')}">ไซส์ ${escapeHtml(variant.size || '-')} · เหลือ ${variant.qty}</option>`).join('');
+    return `
+      <div class="sell-card" data-sale-card="${index}">
+        <div class="sell-card-top"><span class="tag ${first.type}">มือ${first.type==='used'?'2':'1'}</span><span class="sell-stock">คงเหลือ ${first.qty}</span></div>
+        <div style="display:flex; gap:10px; align-items:flex-start;">
+          <div class="thumb" style="width:40px;height:40px;flex-shrink:0;">${group.image ? `<img src="${group.image}" alt="">` : '<span class="thumb-ph">👕</span>'}</div>
+          <div style="flex:1; min-width:0;"><div class="sell-name">${escapeHtml(group.name)}</div><div class="sell-price">${fmtMoney(first.price)} <span class="sell-cost-note">ต้นทุน ${fmtMoney(first.cost)}</span></div></div>
         </div>
-      </div>
-      <div class="sell-form">
-        <div class="field">
-          <label>จำนวน</label>
-          <input type="number" min="1" max="${v.qty}" value="1" id="sellqty-${v.id}">
+        <div class="sell-picker"><div class="field"><label>สี</label><select class="sell-color-select">${colorOptions}</select></div><div class="field"><label>ไซส์</label><select class="sell-size-select">${sizeOptions}</select></div></div>
+        <div class="sell-form">
+          <div class="field"><label>จำนวน</label><input class="sell-qty" type="number" min="1" max="${first.qty}" value="1"></div>
+          <div class="field"><label>ราคาขายจริง/ชิ้น</label><input class="sell-price-input" type="number" min="0" step="0.01" value="${first.price}"></div>
+          <div class="field"><label>ค่าส่ง (รวม)</label><input class="sell-shipping" type="number" min="0" step="0.01" value="0"></div>
+          <div class="field"><label>ค่ากลาง (รวม)</label><input class="sell-commission" type="number" min="0" step="0.01" value="0"></div>
         </div>
-        <div class="field">
-          <label>ราคาขายจริง/ชิ้น</label>
-          <input type="number" min="0" step="0.01" value="${v.price}" id="sellprice-${v.id}">
-        </div>
-        <div class="field">
-          <label>ค่าส่ง (รวม)</label>
-          <input type="number" min="0" step="0.01" value="0" id="sellship-${v.id}">
-        </div>
-        <div class="field">
-          <label>ค่ากลาง (รวม)</label>
-          <input type="number" min="0" step="0.01" value="0" id="sellcomm-${v.id}">
-        </div>
-      </div>
-      <button class="btn btn-gold btn-sm" style="width:100%; margin-top:10px;" data-sell="${v.id}">กดขาย</button>
-      <div class="checkline" style="margin-top:10px;">
-        <input type="checkbox" id="sellinst-${v.id}" data-inst-toggle="${v.id}">
-        <label for="sellinst-${v.id}">ลูกค้าผ่อนชำระ (ไม่ได้เงินก้อนเดียว)</label>
-      </div>
-      <div class="field" id="sellduedays-wrap-${v.id}" style="display:none; margin-top:6px;">
-        <label>ผ่อนชำระให้ครบภายใน (วัน)</label>
-        <input type="number" min="1" value="30" id="sellduedays-${v.id}">
-        <label style="margin-top:6px;">มัดจำที่ได้รับตอนนี้ (ถ้ามี)</label>
-        <input type="number" min="0" step="0.01" value="0" id="selldeposit-${v.id}">
-        <label style="margin-top:6px;">ชื่อลูกค้า/บันทึกเพิ่มเติม</label>
-        <input type="text" placeholder="เช่น ชื่อลูกค้า, เบอร์โทร" id="sellcustomer-${v.id}">
-      </div>
-    </div>
-  `).join('');
+        <button class="btn btn-gold btn-sm sell-submit" style="width:100%; margin-top:10px;" data-sell="${first.id}">กดขาย</button>
+        <div class="checkline" style="margin-top:10px;"><input type="checkbox" class="sell-installment"><label>ลูกค้าผ่อนชำระ (ไม่ได้เงินก้อนเดียว)</label></div>
+        <div class="field sell-installment-fields" style="display:none; margin-top:6px;"><label>ผ่อนชำระให้ครบภายใน (วัน)</label><input class="sell-due-days" type="number" min="1" value="30"><label style="margin-top:6px;">มัดจำที่ได้รับตอนนี้ (ถ้ามี)</label><input class="sell-deposit" type="number" min="0" step="0.01" value="0"><label style="margin-top:6px;">ชื่อลูกค้า/บันทึกเพิ่มเติม</label><input class="sell-customer" type="text" placeholder="เช่น ชื่อลูกค้า, เบอร์โทร"></div>
+      </div>`;
+  }).join('');
 
   const outOfStock = allVariants().filter(({variant})=>variant.qty<=0);
   const outList = outOfStock.length ? `
@@ -1524,7 +1678,7 @@ function renderSellTab(){
     <div class="panel">
       <h2>กดขายสินค้า</h2>
       <p class="hint">ใส่ราคาขายจริง ค่าส่ง และค่ากลาง (ถ้ามี) แล้วกด "กดขาย" ระบบจะตัดสต็อกและบันทึกรายรับ-กำไรให้อัตโนมัติ</p>
-      ${inStock.length===0 ? `
+      ${groups.length===0 ? `
         <div class="empty">
           <div class="big">ไม่มีสินค้าพร้อมขาย</div>
           เพิ่มสินค้าในแท็บ "สต็อกสินค้า" ก่อน
@@ -1535,28 +1689,41 @@ function renderSellTab(){
 }
 
 function wireSellTab(){
-  document.querySelectorAll('[data-inst-toggle]').forEach(cb=>{
-    cb.onchange = ()=>{
-      const wrap = document.getElementById('sellduedays-wrap-'+cb.dataset.instToggle);
-      if(wrap) wrap.style.display = cb.checked ? 'block' : 'none';
-    };
+  function syncSaleCard(card){
+    const color = card.querySelector('.sell-color-select').value;
+    const size = card.querySelector('.sell-size-select');
+    [...size.options].forEach(option => { option.hidden = option.dataset.color !== color; option.disabled = option.dataset.color !== color; });
+    if(size.selectedOptions[0]?.disabled) size.value = [...size.options].find(option => !option.disabled)?.value || '';
+    const found = findVariant(size.value);
+    if(!found) return;
+    const {variant} = found;
+    card.querySelector('.sell-stock').textContent = 'คงเหลือ ' + variant.qty;
+    card.querySelector('.sell-card-top .tag').className = 'tag ' + variant.type;
+    card.querySelector('.sell-card-top .tag').textContent = variant.type==='used' ? 'มือ2' : 'มือ1';
+    card.querySelector('.sell-price').innerHTML = `${fmtMoney(variant.price)} <span class="sell-cost-note">ต้นทุน ${fmtMoney(variant.cost)}</span>`;
+    const qty = card.querySelector('.sell-qty'); qty.max = variant.qty; if(Number(qty.value) > variant.qty) qty.value = 1;
+    card.querySelector('.sell-price-input').value = variant.price;
+    card.querySelector('.sell-submit').dataset.sell = variant.id;
+  }
+  document.querySelectorAll('[data-sale-card]').forEach(card => {
+    card.querySelector('.sell-color-select').onchange = ()=>syncSaleCard(card);
+    card.querySelector('.sell-size-select').onchange = ()=>syncSaleCard(card);
+    card.querySelector('.sell-installment').onchange = event => { card.querySelector('.sell-installment-fields').style.display = event.target.checked ? 'block' : 'none'; };
+    syncSaleCard(card);
   });
   document.querySelectorAll('[data-sell]').forEach(btn=>{
     btn.onclick = ()=>{
       const id = btn.dataset.sell;
-      const instCb = document.getElementById('sellinst-'+id);
-      const dueDaysEl = document.getElementById('sellduedays-'+id);
-      const depositEl = document.getElementById('selldeposit-'+id);
-      const customerEl = document.getElementById('sellcustomer-'+id);
+      const card = btn.closest('[data-sale-card]');
       sellVariant(id, {
-        qty: document.getElementById('sellqty-'+id).value,
-        sellPrice: document.getElementById('sellprice-'+id).value,
-        shipping: document.getElementById('sellship-'+id).value,
-        commission: document.getElementById('sellcomm-'+id).value,
-        installment: instCb ? instCb.checked : false,
-        dueDays: dueDaysEl ? dueDaysEl.value : 30,
-        deposit: depositEl ? depositEl.value : 0,
-        customerNote: customerEl ? customerEl.value : ''
+        qty: card.querySelector('.sell-qty').value,
+        sellPrice: card.querySelector('.sell-price-input').value,
+        shipping: card.querySelector('.sell-shipping').value,
+        commission: card.querySelector('.sell-commission').value,
+        installment: card.querySelector('.sell-installment').checked,
+        dueDays: card.querySelector('.sell-due-days').value,
+        deposit: card.querySelector('.sell-deposit').value,
+        customerNote: card.querySelector('.sell-customer').value
       });
     };
   });

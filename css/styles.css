@@ -118,6 +118,16 @@
   .size-row input[name="sizeRow"]{ flex:1; }
   .size-row input[name="qtyRow"]{ width:90px; }
   .size-row .remove-size-row{ flex-shrink:0; }
+  .restock-row{ display:grid; grid-template-columns:minmax(220px, 2fr) 90px minmax(120px, 1fr) minmax(120px, 1fr) auto; gap:8px; align-items:center; margin-bottom:8px; }
+  .restock-row select, .restock-row input{ width:100%; font-family:'Nunito',sans-serif; font-weight:600; font-size:14px; padding:10px 12px; }
+  .restock-heading{ color:var(--ink-soft); font-size:12px; font-weight:700; margin-bottom:3px; }
+  #restock-rows.lump-mode .restock-row-cost{ opacity:.45; pointer-events:none; }
+  @media (max-width: 760px){
+    .restock-heading{ display:none; }
+    .restock-row{ grid-template-columns:1fr 1fr; padding:10px; border-radius:12px; background:var(--surface-in); }
+    .restock-row select{ grid-column:1/-1; }
+    .restock-row .remove-restock-row{ justify-self:end; }
+  }
   .pending-row{ background: var(--surface-in); border-radius:14px; padding:10px; margin-bottom:8px;
     box-shadow: inset 3px 3px 7px var(--sh-d), inset -3px -3px 7px var(--sh-l); }
   .pending-row-grid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(88px,1fr)); gap:6px; align-items:center; }
@@ -165,10 +175,10 @@
   .sell-cell input{ width:56px; padding:8px; border:none; border-radius:12px; font-family:'IBM Plex Mono',monospace; text-align:center;
     background: var(--surface-in); box-shadow: inset 3px 3px 6px var(--sh-d), inset -3px -3px 6px var(--sh-l);}
 
-  .sell-grid{ display:grid; grid-template-columns: repeat(3, 1fr); gap:14px; }
-  @media (max-width: 760px){ .sell-grid{ grid-template-columns: repeat(2,1fr);} }
+  .sell-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 290px), 1fr)); gap:14px; }
+  @media (max-width: 760px){ .sell-grid{ grid-template-columns:1fr;} }
   @media (max-width: 480px){ .sell-grid{ grid-template-columns: 1fr;} }
-  .sell-card{ background: var(--surface); border-radius:20px; box-shadow: 6px 6px 14px var(--sh-d), -6px -6px 14px var(--sh-l); padding:16px; position:relative; }
+  .sell-card{ min-width:0; background: var(--surface); border-radius:20px; box-shadow: 6px 6px 14px var(--sh-d), -6px -6px 14px var(--sh-l); padding:16px; position:relative; }
   .sell-card-top{ display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;}
   .sell-stock{ font-family:'IBM Plex Mono',monospace; font-size:11px; color: var(--ink-soft); font-weight:600;}
   .sell-name{ font-weight:700; font-size:14.5px; margin-bottom:4px; color: var(--navy);}
@@ -177,7 +187,9 @@
   .sell-cost-note{ font-family:'Nunito',sans-serif; font-size:11px; color: var(--ink-soft); font-weight:600; }
   .sell-form{ display:grid; grid-template-columns: repeat(2,1fr); gap:8px; margin-top:12px; }
   .sell-form .field label{ font-size:10px; }
-  .sell-form .field input{ padding:8px 9px; font-size:13px; }
+  .sell-form .field input{ min-width:0; width:100%; padding:8px 9px; font-size:13px; }
+  .sell-picker{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:12px; }
+  .sell-picker select{ width:100%; min-width:0; padding:8px; font-size:13px; }
 
   .empty{ text-align:center; padding: 36px 10px; color: var(--ink-soft); }
   .empty .big{ font-family:'Baloo 2',sans-serif; font-weight:700; font-size:16px; color:var(--navy); margin-bottom:4px;}
@@ -218,12 +230,19 @@
   .prod-group{ margin-bottom:12px; background:var(--surface-in); border-radius:18px; padding:12px; box-shadow: inset 2px 2px 5px var(--sh-d), inset -2px -2px 5px var(--sh-l); }
   .prod-group-head{ display:flex; align-items:center; gap:12px; margin-bottom:8px; }
   .prod-group-name{ font-weight:800; font-size:14px; color:var(--navy); flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .prod-group-color{ color:var(--ink-soft); font-weight:700; font-size:12px; }
   .prod-group-total{ font-size:11px; color:var(--ink-soft); font-weight:600; }
   .variant-row{ display:flex; align-items:center; gap:10px; background:var(--surface); border-radius:12px; padding:8px 10px; margin-top:6px; }
   .variant-row.low{ box-shadow: 0 0 0 1.5px #e8a33d; }
   .variant-row.out{ opacity:.5; }
   .variant-info{ flex:1; min-width:0; font-size:12.5px; font-weight:600; color:var(--ink); }
   .variant-qty{ font-family:'IBM Plex Mono',monospace; font-weight:700; font-size:13px; color:var(--navy); min-width:34px; text-align:center; }
+  .panel-title-action{ display:flex; justify-content:space-between; align-items:flex-start; gap:14px; margin-bottom:12px; }
+  .panel-title-action h2{ margin-bottom:2px; }
+  .stock-size-list{ min-width:260px; }
+  .stock-size-item{ display:grid; grid-template-columns:minmax(130px,1fr) 75px auto auto; gap:6px; align-items:center; padding:5px 0; border-bottom:1px solid rgba(163,177,205,.2); font-size:12px; }
+  .stock-size-item:last-child{ border-bottom:none; }
+  @media (max-width: 600px){ .panel-title-action{ flex-direction:column; } .stock-size-list{ min-width:230px; } }
 
   .home-list{ display:flex; flex-direction:column; }
   .ai-result{ margin-top:18px; padding:18px; background:var(--surface-in); border-radius:16px; font-size:13.5px; line-height:1.75; box-shadow: inset 3px 3px 7px var(--sh-d), inset -3px -3px 7px var(--sh-l); color:var(--ink); }
