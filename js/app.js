@@ -571,6 +571,34 @@ async function receivePendingOrder(pendingId, shippingPaid){
   }
   render();
 }
+async function receivePendingOrdersBulk(ids, shippingTotal){
+  const receivedItems = [];
+  ids.forEach(id => {
+    const idx = pendingOrders.findIndex(p=>p.id===id);
+    if(idx===-1) return;
+    const po = pendingOrders[idx];
+    const {prod, variant} = addVariantCore({
+      name: po.name, color: po.color, size: po.size, type: po.type,
+      cost: po.cost, price: po.price, qty: po.qty, image: po.image
+    });
+    pendingOrders.splice(idx,1);
+    receivedItems.push({prod, variant, qty: po.qty});
+  });
+  if(receivedItems.length===0) return;
+  await saveProducts();
+  await savePending();
+  const shipAmt = parseFloat(shippingTotal)||0;
+  if(shipAmt > 0){
+    const desc = receivedItems.map(({prod,variant,qty})=> variantLabel(prod,variant) + ' x' + qty).join(', ');
+    transactions.unshift({
+      id: uid(), type:'expense', category:'ค่าส่งสินค้าเข้า',
+      desc: desc + ' (ค่าส่งตอนรับของ)',
+      amount: shipAmt, date: todayStr(), productId: null
+    });
+    await saveTx();
+  }
+  render();
+}
 
 async function deletePendingOrder(pendingId){
   if(!(await showConfirm('ยกเลิกรายการสั่งซื้อนี้? (ยอดที่จ่ายไปแล้วจะยังอยู่ในบัญชีรายจ่าย ไม่ถูกลบ)'))) return;
@@ -1306,22 +1334,32 @@ function renderStockTab(){
 
     <div class="panel">
       <h2>สินค้าที่สั่งซื้อแล้ว รอรับของ${pendingOrders.length>0 ? ' ('+pendingOrders.length+')' : ''}</h2>
-      <p class="hint">รายการนี้จ่ายเงินไปแล้ว (นับเป็นรายจ่ายแล้ว) แต่ยังไม่นับเป็นสต็อกที่ขายได้ จนกว่าจะกดยืนยันว่าได้รับของจริง</p>
+      <p class="hint">รายการนี้จ่ายเงินไปแล้ว (นับเป็นรายจ่ายแล้ว) แต่ยังไม่นับเป็นสต็อกที่ขายได้ จนกว่าจะกดยืนยันว่าได้รับของจริง — ติ๊กเลือกรายการที่ของมาถึงพร้อมกัน แล้วใส่ค่าส่งรวมครั้งเดียวได้</p>
       ${pendingOrders.length===0 ? `<div class="empty"><div class="big">ไม่มีรายการรอรับของ</div></div>` : `
       <div style="display:flex; flex-direction:column; gap:8px;">
         ${pendingOrders.map(po => `
           <div class="variant-row" style="align-items:center;">
+            <input type="checkbox" class="pending-select" data-pending-id="${po.id}" style="width:18px; height:18px; accent-color: var(--navy); flex-shrink:0;">
             <div class="thumb" style="width:36px;height:36px;">${po.image ? `<img src="${po.image}" alt="">` : '<span class="thumb-ph">📦</span>'}</div>
             <div class="variant-info">
               ${escapeHtml(pendingLabel(po))} x${po.qty}<br>
               <span class="hint" style="margin:0;">สั่งเมื่อ ${po.orderDate} · จ่ายไปแล้ว ${fmtMoney(po.cost*po.qty)}${po.note ? ' · '+escapeHtml(po.note) : ''}</span>
             </div>
-            <input type="number" min="0" step="0.01" value="0" class="pending-ship-input" id="pendingship-${po.id}" placeholder="ค่าส่ง" style="width:80px; padding:6px; border:none; border-radius:10px; background:var(--surface); box-shadow: inset 2px 2px 5px var(--sh-d), inset -2px -2px 5px var(--sh-l); text-align:center; font-family:'IBM Plex Mono',monospace;">
-            <button class="btn btn-gold btn-sm" data-receive="${po.id}">ยืนยันได้รับของแล้ว</button>
             <button class="btn-danger" data-cancel-pending="${po.id}">ยกเลิก</button>
           </div>
         `).join('')}
-      </div>`}
+      </div>
+      <div class="form-grid" style="margin-top:14px; grid-template-columns:1fr 1fr;">
+        <div class="field">
+          <label>ค่าส่งรวม (สำหรับรายการที่ติ๊กเลือก)</label>
+          <input type="number" id="pending-bulk-ship" min="0" step="0.01" value="0">
+        </div>
+      </div>
+      <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
+        <button type="button" class="btn btn-ghost btn-sm" id="pending-select-all">เลือกทั้งหมด</button>
+        <button class="btn btn-gold" id="pending-receive-selected">ยืนยันได้รับของที่เลือกแล้ว</button>
+      </div>
+      `}
     </div>
 
     <div class="panel">
@@ -1331,13 +1369,19 @@ function renderStockTab(){
         <input type="text" id="attach-ship-search" placeholder="ค้นหาสินค้าที่จะแนบ...">
       </div>
       ${allVariants().length===0 ? `<div class="empty"><div class="big">ยังไม่มีสินค้าในสต็อกให้แนบค่าส่ง</div></div>` : `
-      <div id="attach-ship-list" style="max-height:280px; overflow-y:auto; display:flex; flex-direction:column; gap:6px;">
-        ${allVariants().map(({product:p, variant:v}) => `
-          <div class="variant-row" data-attach-row="${v.id}" data-attach-label="${escapeHtml(variantLabel(p,v)).toLowerCase()}">
-            <div class="variant-info">${escapeHtml(variantLabel(p,v))} (คงเหลือ ${v.qty})</div>
-            <input type="number" min="0" max="${v.qty}" value="0" class="attach-qty" data-variant="${v.id}" style="width:70px; padding:6px; border:none; border-radius:10px; background:var(--surface); box-shadow: inset 2px 2px 5px var(--sh-d), inset -2px -2px 5px var(--sh-l); text-align:center; font-family:'IBM Plex Mono',monospace;">
+      <div id="attach-ship-list" style="max-height:320px; overflow-y:auto; display:flex; flex-direction:column; gap:6px;">
+        ${stockColorGroups().map((group, gi) => {
+          const sortedVariants = [...group.variants].sort((a,b)=>compareSizes(a.variant.size, b.variant.size));
+          const sizeOptions = sortedVariants.map(({variant:v}) => `<option value="${v.id}">ไซส์ ${escapeHtml(v.size||'-')} · เหลือ ${v.qty}</option>`).join('');
+          const first = sortedVariants[0].variant;
+          return `
+          <div class="variant-row" data-attach-row="${gi}" data-attach-label="${escapeHtml(group.name + ' ' + group.color).toLowerCase()}">
+            <div class="variant-info">${escapeHtml(group.name)} · ${escapeHtml(group.color)}</div>
+            <select class="attach-size-select">${sizeOptions}</select>
+            <input type="number" min="0" max="${first.qty}" value="0" class="attach-qty" data-variant="${first.id}" style="width:70px; padding:6px; border:none; border-radius:10px; background:var(--surface); box-shadow: inset 2px 2px 5px var(--sh-d), inset -2px -2px 5px var(--sh-l); text-align:center; font-family:'IBM Plex Mono',monospace;">
           </div>
-        `).join('')}
+        `;
+        }).join('')}
       </div>
       <div class="form-grid" style="margin-top:14px; grid-template-columns:1fr 1fr;">
         <div class="field">
@@ -1787,18 +1831,40 @@ function wireStockTab(){
       showAlert('รวมข้อมูลไม่สำเร็จ กรุณาลองอีกครั้ง');
     }
   };
-  document.querySelectorAll('[data-receive]').forEach(btn=>{
-    btn.onclick = ()=>{
-      const id = btn.dataset.receive;
-      const shipInput = document.getElementById('pendingship-'+id);
-      receivePendingOrder(id, shipInput ? shipInput.value : 0);
+  const pendingSelectAllBtn = document.getElementById('pending-select-all');
+  if(pendingSelectAllBtn){
+    pendingSelectAllBtn.onclick = ()=>{
+      const boxes = document.querySelectorAll('.pending-select');
+      const allChecked = [...boxes].every(b=>b.checked);
+      boxes.forEach(b=> b.checked = !allChecked);
+      pendingSelectAllBtn.textContent = allChecked ? 'เลือกทั้งหมด' : 'ยกเลิกที่เลือกทั้งหมด';
     };
-  });
+  }
+  const pendingReceiveBtn = document.getElementById('pending-receive-selected');
+  if(pendingReceiveBtn){
+    pendingReceiveBtn.onclick = async ()=>{
+      const ids = [...document.querySelectorAll('.pending-select:checked')].map(cb=>cb.dataset.pendingId);
+      if(ids.length===0){ showAlert('กรุณาติ๊กเลือกรายการที่ต้องการยืนยันว่าได้รับของแล้ว'); return; }
+      const shipAmt = document.getElementById('pending-bulk-ship').value;
+      await receivePendingOrdersBulk(ids, shipAmt);
+    };
+  }
   document.querySelectorAll('[data-cancel-pending]').forEach(btn=>{
     btn.onclick = ()=> deletePendingOrder(btn.dataset.cancelPending);
   });
 
   // --- bulk attach shipping ---
+  document.querySelectorAll('.attach-size-select').forEach(sel=>{
+    sel.onchange = ()=>{
+      const row = sel.closest('[data-attach-row]');
+      const qtyInput = row.querySelector('.attach-qty');
+      const found = findVariant(sel.value);
+      qtyInput.dataset.variant = sel.value;
+      const maxQty = found ? found.variant.qty : 0;
+      qtyInput.max = maxQty;
+      if(Number(qtyInput.value) > maxQty) qtyInput.value = 0;
+    };
+  });
   const attachSearch = document.getElementById('attach-ship-search');
   if(attachSearch){
     attachSearch.oninput = ()=>{

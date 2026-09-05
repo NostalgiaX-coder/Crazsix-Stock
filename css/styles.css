@@ -264,3 +264,4 @@
   .soldout-group{ opacity:.75; }
   .tag.soldout{ background:#eceef4; color:var(--ink-soft); }
   .stock-size-item.soldout-item{ opacity:.6; font-style:italic; }
+  .attach-size-select{ font-family:'Nunito',sans-serif; font-weight:600; font-size:13px; padding:8px 10px; border:none; border-radius:10px; background:var(--surface); box-shadow: inset 2px 2px 5px var(--sh-d), inset -2px -2px 5px var(--sh-l); flex-shrink:0; }
