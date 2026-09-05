@@ -410,12 +410,12 @@ async function addProductOrVariant(data){
   render();
 }
 
-// base: {name,color,type,price,image,logExpense,shippingIn}; rows: [{size,qty,cost}]
+// rows: [{name,color,size,type,price,cost,qty,image}]; base: {logExpense, shippingIn}
 async function addProductBatch(base, rows){
   const created = rows.map(r => ({
     ...addVariantCore({
-      name: base.name, color: r.color, size: r.size, type: base.type,
-      cost: r.cost, price: base.price, qty: r.qty, image: base.image
+      name: r.name, color: r.color, size: r.size, type: r.type,
+      cost: r.cost, price: r.price, qty: r.qty, image: r.image
     }),
     addedQty: r.qty,
     batchCost: r.cost
@@ -859,12 +859,15 @@ function render(){
 function renderHomeTab(){
   const low = lowStockVariants();
   const q = stockSearch.trim().toLowerCase();
+  const matchesQuery = (product, variant) => !q || [product.name, variant.color, variant.size].filter(Boolean).join(' ').toLowerCase().includes(q);
 
   const groups = stockColorGroups().map(group=>{
-    const variants = group.variants.filter(({product, variant})=>{
-      if(!q) return true;
-      return [product.name, variant.color, variant.size].filter(Boolean).join(' ').toLowerCase().includes(q);
-    });
+    const variants = group.variants.filter(({product, variant})=> matchesQuery(product, variant) && !(variant.type==='used' && variant.qty<=0));
+    return {...group, variants};
+  }).filter(g=>g.variants.length>0);
+
+  const soldOutGroups = stockColorGroups().map(group=>{
+    const variants = group.variants.filter(({product, variant})=> matchesQuery(product, variant) && variant.type==='used' && variant.qty<=0);
     return {...group, variants};
   }).filter(g=>g.variants.length>0);
 
@@ -913,6 +916,32 @@ function renderHomeTab(){
     `;
   }).join('');
 
+  const soldOutHtml = soldOutGroups.length===0 ? '' : `
+    <div class="soldout-section">
+      <h3 class="soldout-title">📪 สินค้ามือสองที่ขายหมดแล้ว (Sold out) — ของมือสองหายาก ไม่ต้องเติมสต็อก</h3>
+      <div class="home-list">
+        ${soldOutGroups.map(group=>{
+          const rows = [...group.variants].sort((a,b)=>compareSizes(a.variant.size, b.variant.size)).map(({variant:v})=>`
+            <div class="variant-row out">
+              <div class="variant-info">${v.size ? 'ไซส์ '+escapeHtml(v.size) : '-'}</div>
+              <span class="tag soldout">หมดแล้ว</span>
+              <button class="btn btn-ghost btn-sm" data-stats="${v.id}">สถิติ</button>
+            </div>
+          `).join('');
+          return `
+            <div class="prod-group soldout-group">
+              <div class="prod-group-head">
+                <div class="thumb" style="width:44px;height:44px;">${group.image ? `<img src="${group.image}" alt="">` : '<span class="thumb-ph">👕</span>'}</div>
+                <div class="prod-group-name">${escapeHtml(group.name)} <span class="prod-group-color">· ${escapeHtml(group.color)}</span></div>
+              </div>
+              ${rows}
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+
   return `
     <div class="panel">
       ${alertBlock}
@@ -925,6 +954,7 @@ function renderHomeTab(){
         <div class="empty">
           <div class="big">${products.length===0 ? 'ยังไม่มีสินค้าในสต็อก' : 'ไม่พบสินค้าที่ค้นหา'}</div>
         </div>` : `<div class="home-list">${groupHtml}</div>`}
+      ${soldOutHtml}
     </div>
   `;
 }
@@ -1080,19 +1110,81 @@ function pendingRowTemplate(idx){
     </div>
   `;
 }
+function productBlockTemplate(idx){
+  return `
+    <div class="product-block" data-block-idx="${idx}">
+      <div class="form-grid">
+        <div class="field" style="grid-column:span 2">
+          <label>ชื่อสินค้า</label>
+          <input type="text" class="pb-name" list="product-name-list" placeholder="เช่น เสื้อยืดลายกราฟฟิก">
+        </div>
+        <div class="field">
+          <label>ประเภทสินค้า</label>
+          <div class="type-toggle pb-type-toggle">
+            <label><input type="radio" name="pbType_${idx}" value="new" checked><span>มือ1</span></label>
+            <label><input type="radio" name="pbType_${idx}" value="used"><span>มือ2</span></label>
+          </div>
+        </div>
+        <div class="field">
+          <label>รูปสินค้า (ถ้ามี)</label>
+          <input type="file" class="pb-image" accept="image/*">
+        </div>
+        <div class="field" style="grid-column:span 2">
+          <label>สี ไซส์ และจำนวน (เพิ่มได้หลายไซส์ของสินค้านี้)</label>
+          <div class="pb-size-rows">
+            <div class="pb-size-row">
+              <input type="text" class="pbRowColor" placeholder="สี เช่น ดำ">
+              <input type="text" class="pbRowSize" placeholder="ไซส์ เช่น S">
+              <input type="number" class="pbRowQty" min="1" placeholder="จำนวน">
+              <button type="button" class="btn-danger remove-pb-size-row" style="display:none;">×</button>
+            </div>
+          </div>
+          <button type="button" class="btn btn-ghost btn-sm add-pb-size-row" style="margin-top:4px;">+ เพิ่มไซส์อีก</button>
+        </div>
+        <div class="field">
+          <label>ราคาที่ตั้งใจขาย/ชิ้น (โน้ต)</label>
+          <input type="number" class="pb-price" min="0" step="0.01">
+        </div>
+        <div class="pb-cost-block" style="display:contents;">
+          <div class="field" style="grid-column:span 2">
+            <label>วิธีคิดต้นทุนของสินค้านี้</label>
+            <div class="type-toggle pb-cost-mode-toggle">
+              <label><input type="radio" name="pbCostMode_${idx}" value="perunit" checked><span>ต่อชิ้น</span></label>
+              <label><input type="radio" name="pbCostMode_${idx}" value="lump"><span>เหมาทั้งล็อตของสินค้านี้</span></label>
+            </div>
+          </div>
+          <div class="field pb-cost-perunit-field">
+            <label>ต้นทุน/ชิ้น</label>
+            <input type="number" class="pb-cost-perunit" min="0" step="0.01">
+          </div>
+          <div class="field pb-cost-lump-field" style="display:none;">
+            <label>ยอดที่จ่ายทั้งล็อตของสินค้านี้ (ทุกไซส์รวมกัน)</label>
+            <input type="number" class="pb-cost-lump" min="0" step="0.01">
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:8px; text-align:right;">
+        <button type="button" class="btn-danger remove-product-block" style="display:none;">ลบสินค้านี้ออกจากรายการ</button>
+      </div>
+    </div>
+  `;
+}
 
 function renderStockTab(){
   const rows = stockColorGroups().map(group => {
     const totalQty = group.variants.reduce((sum, {variant}) => sum + variant.qty, 0);
     const totalValue = group.variants.reduce((sum, {variant}) => sum + variant.cost * variant.qty, 0);
     const averageCost = totalQty ? totalValue / totalQty : 0;
-    const sizeRows = group.variants.map(({variant:v}) => `
-      <div class="stock-size-item">
-        <span>ไซส์ ${escapeHtml(v.size||'-')} · ${v.type==='new'?'มือ1':'มือ2'} · ${v.qty} ชิ้น</span>
+    const sizeRows = group.variants.map(({variant:v}) => {
+      const isSoldOutUsed = v.type==='used' && v.qty<=0;
+      return `
+      <div class="stock-size-item ${isSoldOutUsed?'soldout-item':''}">
+        <span>ไซส์ ${escapeHtml(v.size||'-')} · ${v.type==='new'?'มือ1':'มือ2'} · ${isSoldOutUsed ? 'หมดแล้ว (มือสอง ไม่ต้องเติม)' : v.qty + ' ชิ้น'}</span>
         <span>${fmtMoney(v.cost)}</span>
         <button class="btn btn-ghost btn-sm" data-edit="${v.id}">แก้ไข</button>
         <button class="btn-danger" data-del="${v.id}">ลบ</button>
-      </div>`).join('');
+      </div>`;
+    }).join('');
     return `
     <tr>
       <td><div class="thumb-cell">
@@ -1124,62 +1216,35 @@ function renderStockTab(){
         </div>
 
         <div id="new-item-fields" class="form-grid">
-          <div class="field" style="grid-column:span 2">
-            <label>ชื่อสินค้า</label>
-            <input type="text" name="name" list="product-name-list" placeholder="เช่น เสื้อยืดลายกราฟฟิก">
-            <datalist id="product-name-list">${productNameOptions}</datalist>
-          </div>
-          <div class="field" style="grid-column:span 2">
-            <label>รูปสินค้า (ถ้ามี)</label>
-            <input type="file" name="image" accept="image/*">
-          </div>
-          <div class="field">
-            <label>ประเภทสินค้า</label>
-            <div class="type-toggle">
-              <label><input type="radio" name="type" value="new" checked><span>มือ1</span></label>
-              <label><input type="radio" name="type" value="used"><span>มือ2</span></label>
+          <datalist id="product-name-list">${productNameOptions}</datalist>
+          <div class="field" style="grid-column:1/-1">
+            <label>วิธีคิดต้นทุนโดยรวม</label>
+            <div class="type-toggle" id="global-cost-mode-toggle">
+              <label><input type="radio" name="globalCostMode" value="perproduct" checked><span>แยกคิดต้นทุนแต่ละสินค้า</span></label>
+              <label><input type="radio" name="globalCostMode" value="lumpall"><span>เหมารวมทุกสินค้าในครั้งนี้เป็นยอดเดียว</span></label>
             </div>
           </div>
-          <div class="field" style="grid-column:span 2">
-            <label>สี ไซส์ และจำนวน (เพิ่มได้หลายสี/หลายไซส์ในครั้งเดียว)</label>
-            <div id="size-rows">
-              <div class="size-row">
-                <input type="text" name="colorRow" placeholder="สี เช่น ดำ">
-                <input type="text" name="sizeRow" placeholder="ไซส์ เช่น S">
-                <input type="number" name="qtyRow" min="1" placeholder="จำนวน">
-                <button type="button" class="btn-danger remove-size-row" style="display:none;">×</button>
-              </div>
-            </div>
-            <button type="button" class="btn btn-ghost btn-sm" id="add-size-row" style="margin-top:4px;">+ เพิ่มแถวสี/ไซส์อีก</button>
+          <div class="field" id="lump-all-field" style="display:none; grid-column:1/-1;">
+            <label>ยอดที่จ่ายทั้งหมด (ทุกสินค้า ทุกไซส์ ทุกชิ้น ในครั้งนี้รวมกัน)</label>
+            <input type="number" id="lumpAllCost" min="0" step="0.01">
           </div>
+
+          <div id="product-blocks" style="grid-column:1/-1; display:flex; flex-direction:column; gap:14px;">
+            ${productBlockTemplate(0)}
+          </div>
+          <div style="grid-column:1/-1;">
+            <button type="button" class="btn btn-ghost btn-sm" id="add-product-block">+ เพิ่มสินค้าอีกตัว (คนละชื่อ)</button>
+          </div>
+
           <div class="field">
-            <label>วิธีคิดต้นทุน</label>
-            <div class="type-toggle" id="cost-mode-toggle">
-              <label><input type="radio" name="costMode" value="perunit" checked><span>ต่อชิ้น</span></label>
-              <label><input type="radio" name="costMode" value="lump"><span>เหมาทั้งล็อต</span></label>
-            </div>
-          </div>
-          <div class="field" id="cost-perunit-field">
-            <label>ราคาต้นทุน/ชิ้น</label>
-            <input type="number" name="cost" min="0" step="0.01">
-          </div>
-          <div class="field" id="cost-lump-field" style="display:none;">
-            <label>ยอดที่จ่ายทั้งล็อต (ทุกไซส์รวมกัน)</label>
-            <input type="number" name="lumpCost" min="0" step="0.01">
-          </div>
-          <div class="field">
-            <label>ราคาที่ตั้งใจขาย (โน้ต)</label>
-            <input type="number" name="price" min="0" step="0.01">
-          </div>
-          <div class="field">
-            <label>ค่าส่งจากต้นทาง (ครั้งนี้)</label>
+            <label>ค่าส่งจากต้นทาง (รวมทั้งครั้งนี้)</label>
             <input type="number" name="shippingIn" min="0" step="0.01" value="0">
           </div>
           <div class="checkline">
             <input type="checkbox" name="logExpense" id="logExpense" checked>
             <label for="logExpense">บันทึกต้นทุนที่ซื้อเข้าเป็นรายจ่ายทันที</label>
           </div>
-          <p class="hint" style="grid-column:1/-1; margin:2px 0 0;">พิมพ์ชื่อสินค้าที่มีอยู่แล้ว ระบบจะเพิ่มเป็นตัวเลือกสี/ไซส์ใหม่ของสินค้านั้นให้อัตโนมัติ — ถ้าจ่ายเหมาทั้งล็อต ระบบจะหารเฉลี่ยต้นทุนต่อชิ้นให้เอง — "ราคาที่ตั้งใจขาย" เป็นแค่โน้ต ราคาขายจริงใส่ตอนกดขายในแท็บ "ขายสินค้า"</p>
+          <p class="hint" style="grid-column:1/-1; margin:2px 0 0;">แต่ละสินค้าตั้งชื่อของตัวเอง แล้วเพิ่มสี/ไซส์ได้หลายแถวโดยไม่ต้องพิมพ์ชื่อซ้ำ — เลือกได้ว่าจะคิดต้นทุนแยกทีละสินค้า (ต่อชิ้น หรือเหมาทั้งล็อตของสินค้านั้น) หรือจะเหมารวมทุกสินค้าทุกไซส์ในครั้งนี้เป็นยอดเดียวแล้วให้ระบบหารเฉลี่ยต้นทุนต่อชิ้นให้เอง</p>
         </div>
 
         <div id="restock-fields" class="form-grid" style="display:none;">
@@ -1330,8 +1395,7 @@ function wireStockTab(){
     wireToggleLabels(modeToggle);
   }
   // robust click handling for all other type-toggle radio groups on this tab
-  // (ประเภทสินค้า in new-item-fields / pending-fields, and cost-mode-toggle)
-  document.querySelectorAll('#new-item-fields .type-toggle, #pending-fields .type-toggle, #cost-mode-toggle').forEach(wireToggleLabels);
+  document.querySelectorAll('#new-item-fields .type-toggle, #pending-fields .type-toggle').forEach(wireToggleLabels);
 
   // --- restock rows (multiple existing variants in one batch) ---
   const restockRowsDiv = document.getElementById('restock-rows');
@@ -1372,35 +1436,106 @@ function wireStockTab(){
       restockRowsDiv.classList.toggle('lump-mode', isLump);
     });
   }
-
-  // --- size rows (add/remove) ---
-  function wireRemoveButtons(){
-    const rowsDiv = document.getElementById('size-rows');
-    const buttons = rowsDiv.querySelectorAll('.remove-size-row');
-    buttons.forEach(btn=>{
-      btn.style.display = buttons.length>1 ? 'inline-flex' : 'none';
-      btn.onclick = ()=>{
-        if(rowsDiv.children.length>1) btn.closest('.size-row').remove();
-        wireRemoveButtons();
-      };
+  // --- product blocks (multi-product add, each with its own name & sizes) ---
+  const globalCostModeToggle = document.getElementById('global-cost-mode-toggle');
+  const lumpAllField = document.getElementById('lump-all-field');
+  function applyGlobalCostModeVisibility(){
+    const mode = document.querySelector('#global-cost-mode-toggle input[name="globalCostMode"]:checked')?.value || 'perproduct';
+    const isLumpAll = mode === 'lumpall';
+    if(lumpAllField) lumpAllField.style.display = isLumpAll ? 'flex' : 'none';
+    document.querySelectorAll('#product-blocks .pb-cost-block').forEach(el=>{
+      el.style.display = isLumpAll ? 'none' : 'contents';
     });
   }
-  const addSizeBtn = document.getElementById('add-size-row');
-  if(addSizeBtn){
-    addSizeBtn.onclick = ()=>{
-      const rowsDiv = document.getElementById('size-rows');
-      const row = document.createElement('div');
-      row.className = 'size-row';
-      row.innerHTML = `
-        <input type="text" name="colorRow" placeholder="สี เช่น ขาว">
-        <input type="text" name="sizeRow" placeholder="ไซส์ เช่น M">
-        <input type="number" name="qtyRow" min="1" placeholder="จำนวน">
-        <button type="button" class="btn-danger remove-size-row">×</button>
-      `;
-      rowsDiv.appendChild(row);
-      wireRemoveButtons();
+  if(globalCostModeToggle){
+    wireToggleLabels(globalCostModeToggle);
+    globalCostModeToggle.querySelectorAll('input[name="globalCostMode"]').forEach(r=>{
+      r.onchange = ()=>{ if(r.checked) applyGlobalCostModeVisibility(); };
+    });
+  }
+
+  function updateRemoveBlockButtons(){
+    const blocksDiv = document.getElementById('product-blocks');
+    if(!blocksDiv) return;
+    const blocks = blocksDiv.querySelectorAll('.product-block');
+    blocks.forEach(block=>{
+      const btn = block.querySelector('.remove-product-block');
+      if(btn) btn.style.display = blocks.length > 1 ? 'inline-block' : 'none';
+    });
+  }
+
+  function wireProductBlock(block){
+    wireToggleLabels(block.querySelector('.pb-type-toggle'));
+    const costModeToggle = block.querySelector('.pb-cost-mode-toggle');
+    wireToggleLabels(costModeToggle);
+    const perunitField = block.querySelector('.pb-cost-perunit-field');
+    const lumpField = block.querySelector('.pb-cost-lump-field');
+    costModeToggle.querySelectorAll('input').forEach(r=>{
+      r.onchange = ()=>{
+        if(!r.checked) return;
+        const isLump = r.value === 'lump';
+        perunitField.style.display = isLump ? 'none' : 'flex';
+        lumpField.style.display = isLump ? 'flex' : 'none';
+      };
+    });
+
+    function wirePbSizeRemoveButtons(){
+      const rowsDiv = block.querySelector('.pb-size-rows');
+      const buttons = rowsDiv.querySelectorAll('.remove-pb-size-row');
+      buttons.forEach(btn=>{
+        btn.style.display = buttons.length>1 ? 'inline-flex' : 'none';
+        btn.onclick = ()=>{
+          if(rowsDiv.children.length>1) btn.closest('.pb-size-row').remove();
+          wirePbSizeRemoveButtons();
+        };
+      });
+    }
+    wirePbSizeRemoveButtons();
+
+    const addRowBtn = block.querySelector('.add-pb-size-row');
+    if(addRowBtn){
+      addRowBtn.onclick = ()=>{
+        const rowsDiv = block.querySelector('.pb-size-rows');
+        const row = document.createElement('div');
+        row.className = 'pb-size-row';
+        row.innerHTML = `
+          <input type="text" class="pbRowColor" placeholder="สี เช่น ขาว">
+          <input type="text" class="pbRowSize" placeholder="ไซส์ เช่น M">
+          <input type="number" class="pbRowQty" min="1" placeholder="จำนวน">
+          <button type="button" class="btn-danger remove-pb-size-row">×</button>
+        `;
+        rowsDiv.appendChild(row);
+        wirePbSizeRemoveButtons();
+      };
+    }
+
+    const removeBlockBtn = block.querySelector('.remove-product-block');
+    if(removeBlockBtn){
+      removeBlockBtn.onclick = ()=>{
+        const blocksDiv = document.getElementById('product-blocks');
+        if(blocksDiv.children.length > 1) block.remove();
+        updateRemoveBlockButtons();
+      };
+    }
+  }
+
+  let productBlockSeq = 1;
+  document.querySelectorAll('#product-blocks .product-block').forEach(wireProductBlock);
+  updateRemoveBlockButtons();
+  applyGlobalCostModeVisibility();
+
+  const addProductBlockBtn = document.getElementById('add-product-block');
+  if(addProductBlockBtn){
+    addProductBlockBtn.onclick = ()=>{
+      const blocksDiv = document.getElementById('product-blocks');
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = productBlockTemplate(productBlockSeq++);
+      const newBlock = wrapper.firstElementChild;
+      blocksDiv.appendChild(newBlock);
+      wireProductBlock(newBlock);
+      updateRemoveBlockButtons();
+      applyGlobalCostModeVisibility();
     };
-    wireRemoveButtons();
   }
 
   // --- pending order rows (add/remove) ---
@@ -1545,46 +1680,78 @@ function wireStockTab(){
       }
       await addPendingOrderBatch(rows, fd.get('pendingNote')||'');
     }else{
-      const name = (fd.get('name')||'').trim();
-      if(!name){ showAlert('กรุณาระบุชื่อสินค้า'); return; }
+      const globalCostMode = document.querySelector('#global-cost-mode-toggle input[name="globalCostMode"]:checked')?.value || 'perproduct';
+      const blockEls = document.querySelectorAll('#product-blocks .product-block');
+      const blockData = [];
+      let err = null;
 
-      const colorVals = fd.getAll('colorRow');
-      const sizeVals = fd.getAll('sizeRow');
-      const qtyVals = fd.getAll('qtyRow');
-      const rowsRaw = sizeVals.map((s,i)=>({ color:(colorVals[i]||'').trim(), size:(s||'').trim(), qty: parseInt(qtyVals[i],10)||0 })).filter(r=>r.qty>0);
-      if(rowsRaw.length===0){ showAlert('กรุณาระบุสี/ไซส์และจำนวนอย่างน้อย 1 รายการ'); return; }
-      const totalQty = rowsRaw.reduce((s,r)=>s+r.qty,0);
+      blockEls.forEach((block, bi) => {
+        const rowEls = block.querySelectorAll('.pb-size-row');
+        const blockRows = [];
+        rowEls.forEach(rowEl => {
+          const color = rowEl.querySelector('.pbRowColor').value.trim();
+          const size = rowEl.querySelector('.pbRowSize').value.trim();
+          const qty = parseInt(rowEl.querySelector('.pbRowQty').value, 10) || 0;
+          if(!color && !size && !qty) return; // แถวว่างทั้งหมด ข้ามไป
+          if(qty <= 0) return;
+          blockRows.push({color, size, qty});
+        });
+        if(blockRows.length === 0) return; // สินค้าตัวนี้ยังไม่ได้กรอกอะไร ข้ามไปเลย
 
-      const costMode = fd.get('costMode');
-      let unitCost;
-      if(costMode==='lump'){
-        const lump = parseFloat(fd.get('lumpCost'));
-        if(!lump || lump<=0){ showAlert('กรุณาระบุยอดที่จ่ายทั้งล็อต'); return; }
-        unitCost = lump/totalQty;
-      }else{
-        unitCost = parseFloat(fd.get('cost'));
-        if(isNaN(unitCost) || unitCost<0){ showAlert('กรุณาระบุราคาต้นทุนต่อชิ้น'); return; }
+        const name = block.querySelector('.pb-name').value.trim();
+        if(!name){ err = `กรุณาระบุชื่อสินค้าในกลุ่มที่ ${bi+1}`; return; }
+        const type = block.querySelector('.pb-type-toggle input:checked')?.value || 'new';
+        const priceVal = parseFloat(block.querySelector('.pb-price').value);
+        if(isNaN(priceVal) || priceVal < 0){ err = `กรุณาระบุราคาที่ตั้งใจขายของสินค้า "${name}"`; return; }
+
+        let unitCost = null;
+        if(globalCostMode === 'perproduct'){
+          const costMode = block.querySelector('.pb-cost-mode-toggle input:checked')?.value || 'perunit';
+          if(costMode === 'lump'){
+            const lumpVal = parseFloat(block.querySelector('.pb-cost-lump').value);
+            if(isNaN(lumpVal) || lumpVal < 0){ err = `กรุณาระบุยอดต้นทุนทั้งล็อตของสินค้า "${name}"`; return; }
+            const totalQty = blockRows.reduce((s,r)=>s+r.qty,0);
+            unitCost = totalQty > 0 ? lumpVal / totalQty : 0;
+          }else{
+            unitCost = parseFloat(block.querySelector('.pb-cost-perunit').value);
+            if(isNaN(unitCost) || unitCost < 0){ err = `กรุณาระบุต้นทุนต่อชิ้นของสินค้า "${name}"`; return; }
+          }
+        }
+
+        blockData.push({ name, type, price: priceVal, imageFile: block.querySelector('.pb-image').files[0] || null, rows: blockRows, unitCost });
+      });
+
+      if(err){ showAlert(err); return; }
+      if(blockData.length === 0){ showAlert('กรุณาเพิ่มสินค้าอย่างน้อย 1 รายการ พร้อมสี/ไซส์และจำนวน'); return; }
+
+      if(globalCostMode === 'lumpall'){
+        const lumpAll = parseFloat(document.getElementById('lumpAllCost').value);
+        if(isNaN(lumpAll) || lumpAll < 0){ showAlert('กรุณาระบุยอดที่จ่ายทั้งหมด'); return; }
+        const grandTotalQty = blockData.reduce((s,b)=> s + b.rows.reduce((s2,r)=>s2+r.qty,0), 0);
+        const unitCostAll = grandTotalQty > 0 ? lumpAll / grandTotalQty : 0;
+        blockData.forEach(b => { b.unitCost = unitCostAll; });
       }
 
-      let image = null;
-      const file = fd.get('image');
-      if(file && file.size > 0){
-        try{ image = await resizeImageFile(file); }
-        catch(err){ console.error('image resize failed', err); }
+      for(const b of blockData){
+        if(b.imageFile && b.imageFile.size > 0){
+          try{ b.image = await resizeImageFile(b.imageFile); }
+          catch(err2){ console.error('image resize failed', err2); b.image = null; }
+        }else{
+          b.image = null;
+        }
       }
 
-      const priceVal = parseFloat(fd.get('price'));
-      if(isNaN(priceVal) || priceVal<0){ showAlert('กรุณาระบุราคาที่ตั้งใจขาย'); return; }
+      const rows = [];
+      blockData.forEach(b => {
+        b.rows.forEach(r => {
+          rows.push({ name: b.name, color: r.color, size: r.size, qty: r.qty, type: b.type, price: b.price, cost: b.unitCost, image: b.image });
+        });
+      });
 
       const base = {
-        name,
-        type: fd.get('type'),
-        price: priceVal,
-        image,
         logExpense: fd.get('logExpense') === 'on',
         shippingIn: parseFloat(fd.get('shippingIn'))||0
       };
-      const rows = rowsRaw.map(r => ({ color: r.color, size: r.size, qty: r.qty, cost: unitCost }));
       await addProductBatch(base, rows);
     }
     }catch(err){

@@ -114,6 +114,7 @@
   .size-row input{ font-family:'Nunito',sans-serif; font-weight:600; font-size:14px; padding:10px 12px;
     border:none; border-radius:12px; background: var(--surface-in); color: var(--ink);
     box-shadow: inset 3px 3px 6px var(--sh-d), inset -3px -3px 6px var(--sh-l); }
+  .size-row input[name="nameRow"]{ flex:1.6; }
   .size-row input[name="colorRow"]{ flex:1; }
   .size-row input[name="sizeRow"]{ flex:1; }
   .size-row input[name="qtyRow"]{ width:90px; }
@@ -250,3 +251,16 @@
   .overdue-row td{ background: rgba(209,67,91,0.07); }
   .footer-actions{ display:flex; gap:16px; justify-content:center; flex-wrap:wrap; margin-top:8px; }
   .footer-actions button, .footer-actions label{ background:none; border:none; color: var(--ink-soft); font-size:12px; text-decoration:underline; cursor:pointer; font-weight:600; }
+  .product-block{ background: var(--surface-in); border-radius:16px; padding:14px; box-shadow: inset 3px 3px 7px var(--sh-d), inset -3px -3px 7px var(--sh-l); }
+  .pb-size-row{ display:flex; gap:8px; margin-bottom:8px; flex-wrap:wrap; }
+  .pb-size-row input{ font-family:'Nunito',sans-serif; font-weight:600; font-size:14px; padding:10px 12px;
+    border:none; border-radius:12px; background: var(--surface); color: var(--ink);
+    box-shadow: inset 3px 3px 6px var(--sh-d), inset -3px -3px 6px var(--sh-l); }
+  .pb-size-row .pbRowColor{ flex:1; }
+  .pb-size-row .pbRowSize{ flex:1; }
+  .pb-size-row .pbRowQty{ width:90px; }
+  .soldout-section{ margin-top:22px; padding-top:16px; border-top:1px dashed rgba(163,177,205,0.4); }
+  .soldout-title{ font-family:'Baloo 2',sans-serif; font-weight:700; font-size:14px; color:var(--ink-soft); margin:0 0 10px; }
+  .soldout-group{ opacity:.75; }
+  .tag.soldout{ background:#eceef4; color:var(--ink-soft); }
+  .stock-size-item.soldout-item{ opacity:.6; font-style:italic; }
