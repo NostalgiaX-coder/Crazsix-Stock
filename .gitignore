@@ -67,3 +67,10 @@ node_modules/
 
 # dataconnect generated files
 .dataconnect
+
+# Browser regression artifacts
+test-results/
+playwright-report/
+
+# Generated Firebase Hosting assets
+dist/
