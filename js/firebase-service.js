@@ -4,7 +4,7 @@ import {
   doc,
   getDoc,
   setDoc,
-  writeBatch,
+  runTransaction,
   onSnapshot,
   serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
@@ -45,9 +45,17 @@ function documentRef(name) {
   return doc(database(), "stores", storeId, "data", name);
 }
 
+// Firestore may return map keys in a different order after a round trip.
+function comparable(value) {
+  if (Array.isArray(value)) return value.map(comparable);
+  if (value && typeof value === "object")
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, comparable(value[key])]));
+  return value;
+}
+
 /**
  * ชั้นข้อมูลกลางสำหรับแอปสต็อก
- * เอกสารถูกแยกตามชนิดข้อมูล: products, transactions และ pendingOrders
+ * เอกสารถูกแยกตามชนิดข้อมูล: products, transactions, pendingOrders, preorders
  */
 export const stockDatabase = {
   async get(name) {
@@ -65,12 +73,23 @@ export const stockDatabase = {
     });
   },
 
-  async setMany(values) {
-    const batch = writeBatch(database());
-    Object.entries(values).forEach(([name, value]) => {
-      batch.set(documentRef(name), { value, updatedAt: serverTimestamp() });
+  async setMany(values, expected) {
+    // Reject stale edits instead of replacing another device's sale or payment.
+    // No UI mutations inside the retryable Firestore transaction callback.
+    const names = Object.keys(values);
+    await runTransaction(database(), async transaction => {
+      const snapshots = await Promise.all(names.map(name => transaction.get(documentRef(name))));
+      names.forEach((name, index) => {
+        const snapshot = snapshots[index];
+        const current = snapshot.exists() ? snapshot.data().value : [];
+        if (!expected || JSON.stringify(comparable(current || [])) !== JSON.stringify(comparable(expected[name] || []))) {
+          const error = new Error("ข้อมูลเปลี่ยนจากอุปกรณ์อื่น กรุณาตรวจสอบข้อมูลล่าสุดแล้วลองอีกครั้ง");
+          error.code = "store/conflict";
+          throw error;
+        }
+      });
+      names.forEach(name => transaction.set(documentRef(name), { value: values[name], updatedAt: serverTimestamp() }));
     });
-    await batch.commit();
   },
 
   subscribe(name, onValue, onError) {

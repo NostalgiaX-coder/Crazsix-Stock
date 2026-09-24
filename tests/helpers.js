@@ -9,7 +9,8 @@ const inventory = () => ({
     { id: 'variant-2', color: 'ขาว', size: 'L', type: 'used', cost: 80, price: 200, qty: 1, createdAt: today() }
   ] }],
   transactions: [],
-  pendingOrders: []
+  pendingOrders: [],
+  preorders: []
 });
 
 // Every context gets an independent in-memory database. The production Firebase
@@ -38,9 +39,14 @@ async function boot(page, initial = inventory()) {
             window.__testDB[name] = structuredClone(value);
             window.__testWrites.push({ name, value: structuredClone(value) });
           },
-          async setMany(values) {
+          async setMany(values, expected) {
             if (window.__testSaveDelay) await new Promise(resolve => setTimeout(resolve, window.__testSaveDelay));
             if (window.__testSaveError) throw new Error(window.__testSaveError);
+            for (const name of Object.keys(values)) {
+              if (JSON.stringify(window.__testDB[name] ?? []) !== JSON.stringify(expected[name] ?? [])) {
+                const error = new Error('Concurrent update'); error.code = 'store/conflict'; throw error;
+              }
+            }
             const next = structuredClone(values);
             Object.assign(window.__testDB, next);
             window.__testWrites.push({ values: next });

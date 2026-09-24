@@ -2424,3 +2424,38 @@ td {
     grid-column: 1/-1;
   }
 }
+
+/* Customer pre-orders */
+.preorder-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.preorder-intro summary, .preorder-card summary { cursor: pointer; padding: 12px 0; font-weight: 600; }
+.preorder-intro form, .preorder-card form { padding: 8px 0; }
+.preorder-filters { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; }
+.preorder-filters .field:first-child { flex: 1; min-width: 180px; }
+.preorder-list { display: grid; gap: 16px; }
+.preorder-card { border: 1px solid var(--border, #dce2ef); border-radius: 18px; padding: 20px; background: #ffffff80; min-width: 0; overflow-wrap: anywhere; }
+.preorder-card[hidden], .preorder-list [hidden], #preorder-empty[hidden] { display: none !important; }
+.preorder-late { border-color: #c79770; }
+.preorder-heading { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+.preorder-heading h3 { margin: 4px 0; }
+.preorder-heading p { margin: 6px 0; }
+.tag.preorder { background: #eeebfa; color: #675b9d; white-space: nowrap; }
+.preorder-totals { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
+.preorder-totals span { font-size: 12px; color: var(--muted, #667085); }
+.preorder-totals strong { display: block; color: var(--navy); font-size: 18px; margin-top: 4px; }
+.preorder-actions, .preorder-inline { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; margin: 12px 0; }
+.preorder-inline .field { flex: 1; max-width: 280px; }
+.preorder-cost-check { display: flex; align-items: start; gap: 10px; margin-top: 14px; }
+.preorder-cost-check input { width: 18px; height: 18px; flex: 0 0 auto; }
+.preorder-note { white-space: pre-wrap; }
+.preorder-history { list-style: none; margin: 0; padding: 0; }
+.preorder-history li { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid #e0e5ef; }
+@media (max-width: 600px) {
+  .preorder-stats { grid-template-columns: 1fr; }
+  .preorder-heading { flex-direction: column; }
+  .preorder-card { padding: 14px; }
+  .preorder-totals { gap: 8px; }
+  .preorder-totals strong { font-size: 15px; }
+  .preorder-filters { align-items: stretch; }
+  .preorder-filters .field { width: 100%; }
+  .preorder-history li { flex-wrap: wrap; }
+}

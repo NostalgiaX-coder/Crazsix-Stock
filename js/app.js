@@ -1,4 +1,5 @@
 import { stockDatabase, firebaseConfigured } from "./firebase-service.js";
+import { money, preorderStatuses, preorderTotal, preorderOpen, preorderBalance, validatePreorder, createPreorder, updatePreorder } from "./preorders.js";
 
 const STORE_PRODUCTS = "shop_products_v2";
 const STORE_PRODUCTS_OLD = "shop_products_v1";
@@ -8,6 +9,10 @@ const STORE_PENDING = "shop_pending_v1";
 let products = [];
 let transactions = [];
 let pendingOrders = [];
+let preorders = [];
+const STORE_NAMES = ["products", "transactions", "pendingOrders", "preorders"];
+let preorderSearch = "";
+let preorderFilter = "open";
 let activeTab = "home";
 let loaded = false;
 let loadError = false;
@@ -164,12 +169,13 @@ let formDirty = false;
 let realtimeRenderPending = false;
 let realtimeRenderTimer = null;
 const copyData = (value) => JSON.parse(JSON.stringify(value));
-const storeValues = () => ({ products, transactions, pendingOrders });
+const storeValues = () => ({ products, transactions, pendingOrders, preorders });
 function assignStore(name, value) {
   const list = Array.isArray(value) ? value : [];
   if (name === "products") products = list;
   if (name === "transactions") transactions = list;
   if (name === "pendingOrders") pendingOrders = list;
+  if (name === "preorders") preorders = list;
 }
 function markRenderComplete() {
   formDirty = false;
@@ -272,7 +278,7 @@ async function loadStoreData() {
   }
   loadError = false;
   try {
-    const names = ["products", "transactions", "pendingOrders"];
+    const names = STORE_NAMES;
     const values = await Promise.all(
       names.map((name) => stockDatabase.get(name)),
     );
@@ -290,7 +296,7 @@ async function loadStoreData() {
 
 function subscribeToStoreChanges() {
   storeUnsubscribers.forEach((unsubscribe) => unsubscribe());
-  storeUnsubscribers = ["products", "transactions", "pendingOrders"].map(
+  storeUnsubscribers = STORE_NAMES.map(
     (name) =>
       stockDatabase.subscribe(
         name,
@@ -318,13 +324,14 @@ async function saveData(...names) {
   const payload = Object.fromEntries(
     names.map((name) => [name, copyData(values[name])]),
   );
+  const expected = Object.fromEntries(names.map(name => [name, copyData(confirmedStore[name] || [])]));
   names.forEach((name) => savingStores.add(name));
   app.setAttribute("aria-busy", "true");
   const syncStatus = document.querySelector(".sync-status");
   const syncMarkup = syncStatus?.innerHTML;
   if (syncStatus) syncStatus.textContent = "กำลังบันทึก…";
   try {
-    await stockDatabase.setMany(payload);
+    await stockDatabase.setMany(payload, expected);
     names.forEach((name) => {
       confirmedStore[name] = copyData(payload[name]);
     });
@@ -333,10 +340,23 @@ async function saveData(...names) {
     names.forEach((name) =>
       assignStore(name, copyData(confirmedStore[name] || [])),
     );
+    if (error.code === "store/conflict") {
+      // Keep form controls intact; only refresh the underlying data for retry.
+      const latest = await Promise.allSettled(names.map(name => stockDatabase.get(name)));
+      latest.forEach((result, index) => {
+        if (result.status !== "fulfilled") return;
+        const name = names[index];
+        assignStore(name, result.value);
+        confirmedStore[name] = copyData(storeValues()[name]);
+      });
+      requestRealtimeRender();
+    }
     console.error("save failed", error);
     error.storageReported = true;
     showAlert(
-      "บันทึกไม่สำเร็จ ข้อมูลยังไม่ได้เปลี่ยนแปลง กรุณาตรวจสอบการเชื่อมต่อแล้วลองอีกครั้ง",
+      error.code === "store/conflict"
+        ? "มีการเปลี่ยนข้อมูลจากอุปกรณ์อื่น รายการนี้ยังไม่ถูกบันทึก กรุณาเปิดหน้ารายการใหม่เพื่อตรวจสอบข้อมูลล่าสุดแล้วลองอีกครั้ง"
+        : "บันทึกไม่สำเร็จ ข้อมูลยังไม่ได้เปลี่ยนแปลง กรุณาตรวจสอบการเชื่อมต่อแล้วลองอีกครั้ง",
     );
     throw error;
   } finally {
@@ -353,10 +373,11 @@ const savePending = () => saveData("pendingOrders");
 function exportData() {
   const payload = {
     exportedAt: new Date().toISOString(),
-    version: 3,
+    version: 4,
     products,
     transactions,
     pendingOrders,
+    preorders,
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], {
     type: "application/json",
@@ -421,7 +442,7 @@ function validateBackup(data) {
     (tx) =>
       tx &&
       typeof tx.id === "string" &&
-      ["income", "expense", "installment"].includes(tx.type) &&
+      ["income", "expense", "installment", "preorder"].includes(tx.type) &&
       Number.isFinite(tx.amount) &&
       tx.amount >= 0 &&
       validDateString(tx.date) &&
@@ -437,9 +458,28 @@ function validateBackup(data) {
         row.name.trim() &&
         validDateString(row.orderDate),
     );
-  if (!validProducts || !validTransactions || !validPending)
+  const importedPreorders = data.preorders == null ? [] : data.preorders;
+  const uniqueIds = rows => rows.every(row => row && typeof row.id === "string" && row.id.trim()) && new Set(rows.map(row => row.id)).size === rows.length;
+  const validPreorders = Array.isArray(importedPreorders) && importedPreorders.every(row => validatePreorder(row, validDateString));
+  if (!validProducts || !validTransactions || !validPending || !validPreorders)
     throw new Error("พบรายการสินค้า จำนวนเงิน หรือวันที่ไม่ถูกต้องในไฟล์สำรอง");
+  const groups = [importedProducts, importedProducts.flatMap(product => product.variants), data.transactions, importedPending, importedPreorders];
+  if (!groups.every(uniqueIds)) throw new Error("พบรหัสรายการซ้ำหรือว่างในไฟล์สำรอง");
+  const preorderIds = new Set(importedPreorders.map(order => order.id));
+  if (data.transactions.some(tx => (tx.preorderId && !preorderIds.has(tx.preorderId)) || (tx.type === "preorder" && !tx.preorderId)))
+    throw new Error("รายการบัญชี pre-order ไม่มีคำสั่งซื้อที่ตรงกัน");
+  for (const order of importedPreorders) {
+    const ledger = data.transactions.filter(tx => tx.preorderId === order.id);
+    const paid = ledger.filter(tx => tx.type === "income").reduce((sum, tx) => sum + tx.amount, 0);
+    const refunds = ledger.filter(tx => tx.category === "คืนเงิน pre-order").reduce((sum, tx) => sum + tx.amount, 0);
+    const sales = ledger.filter(tx => tx.type === "preorder");
+    if (Math.abs(paid - order.paidAmount) > 0.001 || Math.abs(refunds - order.refundedAmount) > 0.001 ||
+        sales.length !== (order.status === "completed" ? 1 : 0) ||
+        sales.some(tx => tx.amount !== preorderTotal(order) || tx.qty !== order.qty || !Number.isFinite(tx.profit)))
+      throw new Error("ยอดเงินหรือสถานะ pre-order ไม่ตรงกับบัญชีในไฟล์สำรอง");
+  }
   return {
+    preorders: importedPreorders,
     products: importedProducts,
     transactions: data.transactions,
     pendingOrders: importedPending,
@@ -462,8 +502,9 @@ async function handleImportFile(e) {
     }
     products = data.products;
     transactions = data.transactions;
-    pendingOrders = Array.isArray(data.pendingOrders) ? data.pendingOrders : [];
-    await saveData("products", "transactions", "pendingOrders");
+    pendingOrders = data.pendingOrders;
+    preorders = data.preorders;
+    await saveData(...STORE_NAMES);
     e.target.value = "";
     render();
   } catch (err) {
@@ -631,17 +672,16 @@ function summarizeSales(sales) {
   return { totalQtySold, totalProfit, months };
 }
 function topSellers(limit, sortBy) {
-  const map = {};
-  products.forEach((p) => {
-    const agg = productAggregateStats(p.id);
-    if (agg.totalQtySold > 0)
-      map[p.id] = {
-        name: p.name,
-        qty: agg.totalQtySold,
-        profit: agg.totalProfit,
-      };
+  const map = new Map();
+  transactions.filter(tx => tx.category === "ขายสินค้า" && tx.profit != null).forEach(tx => {
+    const product = findVariant(tx.productId)?.product;
+    const key = product?.id || tx.productName || tx.productId || tx.desc;
+    const item = map.get(key) || { name: product?.name || tx.productName || tx.desc || "สินค้าที่นำออกจากสต็อก", qty: 0, profit: 0 };
+    item.qty += tx.qty || 0;
+    item.profit += tx.profit || 0;
+    map.set(key, item);
   });
-  return Object.values(map)
+  return [...map.values()]
     .sort((a, b) => (sortBy === "profit" ? b.profit - a.profit : b.qty - a.qty))
     .slice(0, limit);
 }
@@ -1116,6 +1156,12 @@ async function restockVariants(rows, data) {
 async function editVariant(variantId, data) {
   const found = findVariant(variantId);
   if (!found) return;
+  if (!data.name.trim() || !["new", "used"].includes(data.type) ||
+      !Number.isSafeInteger(data.qty) || data.qty < 0 ||
+      ![data.cost, data.price].every(value => Number.isFinite(value) && value >= 0)) {
+    showAlert("กรุณาระบุชื่อสินค้า จำนวนเต็มตั้งแต่ 0 และราคา/ต้นทุนที่ถูกต้อง");
+    return false;
+  }
   const { product, variant } = found;
   product.name = data.name.trim();
   setProductColorImage(product, data.color, data.image);
@@ -1127,6 +1173,7 @@ async function editVariant(variantId, data) {
   variant.qty = data.qty;
   await saveProducts();
   render();
+  return true;
 }
 
 async function deleteVariant(variantId) {
@@ -1179,17 +1226,20 @@ async function sellVariant(variantId, data) {
     return;
   }
 
+  const revenue = money(sellPrice * qty);
+  const deposit = Number(data.deposit || 0);
+  const dueDays = Number(data.dueDays || 30);
+  if (isInstallment && (!Number.isFinite(deposit) || deposit < 0 || deposit > revenue ||
+      !Number.isSafeInteger(dueDays) || dueDays < 1 || dueDays > 3650)) {
+    showAlert("มัดจำต้องตั้งแต่ 0 และไม่เกินยอดขาย วันครบกำหนดต้องเป็นจำนวนเต็ม 1–3650 วัน");
+    return;
+  }
   variant.qty -= qty;
 
-  const revenue = sellPrice * qty;
-  const profit = revenue - variant.cost * qty - shipping - commission;
+  const profit = money(revenue - variant.cost * qty - shipping - commission);
 
   if (isInstallment) {
     const saleId = uid();
-    const deposit = Math.max(
-      0,
-      Math.min(parseFloat(data.deposit) || 0, revenue),
-    );
     const note = (data.customerNote || "").trim();
     transactions.unshift({
       id: saleId,
@@ -1290,7 +1340,7 @@ async function recordInstallmentPayment(saleTxId, amountStr) {
     showAlert("จำนวนเงินเกินยอดค้างชำระ (" + fmtMoney(remaining) + ")");
     return false;
   }
-  sale.paidAmount = (sale.paidAmount || 0) + amount;
+  sale.paidAmount = money((sale.paidAmount || 0) + amount);
   transactions.unshift({
     id: uid(),
     type: "income",
@@ -1336,6 +1386,10 @@ async function addManualTx(data) {
 async function deleteTx(id) {
   const target = transactions.find((tx) => tx.id === id);
   if (!target) return;
+  if (target.preorderId) {
+    showAlert("รายการนี้ผูกกับ pre-order กรุณาจัดการหรือยกเลิกจากหน้า Pre-order ลูกค้า เพื่อให้ยอดเงินตรงกัน");
+    return;
+  }
   const linkedPayments =
     target.type === "installment"
       ? transactions.filter((tx) => tx.installmentId === id)
@@ -1363,14 +1417,15 @@ async function deleteTx(id) {
 async function resetAll() {
   if (
     !(await showConfirm(
-      "ล้างข้อมูลสินค้า รายการรอรับ และบัญชีทั้งหมด? การกระทำนี้ย้อนกลับไม่ได้",
+      "ล้างข้อมูลสินค้า รายการรอรับ pre-order ลูกค้า และบัญชีทั้งหมด? การกระทำนี้ย้อนกลับไม่ได้",
     ))
   )
     return;
   products = [];
   transactions = [];
   pendingOrders = [];
-  await saveData("products", "transactions", "pendingOrders");
+  preorders = [];
+  await saveData(...STORE_NAMES);
   render();
 }
 
@@ -1419,6 +1474,7 @@ const tabMeta = {
     "box",
     "จัดการสินค้า เติมสต็อก และรับสินค้าเข้า",
   ],
+  preorder: ["Pre-order ลูกค้า", "Pre-order ลูกค้า", "clock", "รับจอง ติดตามมัดจำ และส่งมอบสินค้าที่ลูกค้าพรีกับร้าน"],
   sell: ["ขายสินค้า", "ขายสินค้า", "bag", "พร้อมสำหรับออเดอร์ถัดไปของคุณ"],
   installment: [
     "ติดตามการผ่อนชำระ",
@@ -1555,6 +1611,7 @@ function render() {
   if (activeTab === "home")
     content.innerHTML = renderDashboard() + renderHomeTab();
   else if (activeTab === "stock") content.innerHTML = renderStockTab();
+  else if (activeTab === "preorder") content.innerHTML = renderPreordersTab();
   else if (activeTab === "sell") content.innerHTML = renderSellTab();
   else if (activeTab === "installment")
     content.innerHTML = renderInstallmentsTab();
@@ -1564,6 +1621,7 @@ function render() {
   wireHomeTab();
   wireStockTab();
   wireSellTab();
+  wirePreordersTab();
   wireInstallmentsTab();
   wireTxTab();
   wireReportTab();
@@ -1593,7 +1651,7 @@ function renderDashboard() {
   const low = lowStockVariants();
   const open = openInstallments();
   const balance = open.reduce((s, t) => s + t.amount - (t.paidAmount || 0), 0);
-  return `<section class="dashboard-grid"><div class="panel overview-chart"><div class="section-heading"><div><p class="eyebrow">CASH FLOW</p><h2>ความเคลื่อนไหวของร้าน</h2></div><button class="text-button" data-go="report">ดูรายงาน ${icon("arrow")}</button></div><div class="chart-legend"><span><i class="legend-dot blue"></i>รายรับ</span><span><i class="legend-dot lavender"></i>รายจ่าย</span><span class="period-label">6 เดือนล่าสุด</span></div><div class="cash-chart"><div class="chart-scale"><span>${fmtMoney(max)}</span><span>${fmtMoney(max / 2)}</span><span>฿0</span></div><div class="chart-plot"><svg viewBox="0 0 500 160" preserveAspectRatio="none" role="img" aria-label="กราฟรายรับและรายจ่าย 6 เดือนล่าสุด"><defs><linearGradient id="chart-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6f80ed" stop-opacity=".3"/><stop offset="100%" stop-color="#6f80ed" stop-opacity="0"/></linearGradient></defs><path d="M0 29H500M0 87H500M0 145H500" stroke="#b7c1d4" stroke-opacity=".35" stroke-dasharray="3 5"/><polygon points="0,155 ${line} 500,155" fill="url(#chart-fill)"/><polyline points="${expenseLine}" fill="none" stroke="#b19ccc" stroke-width="2.4" stroke-dasharray="5 5" vector-effect="non-scaling-stroke"/><polyline points="${line}" fill="none" stroke="#687ce5" stroke-width="3" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>${points.map(([x, y]) => `<circle cx="${x}" cy="${y}" r="3" fill="#687ce5"/>`).join("")}</svg><div class="chart-months">${months.map((m) => `<span>${monthLabel(m).split(" ")[0]}</span>`).join("")}</div></div></div><details class="chart-data"><summary>ดูตัวเลขรายเดือน</summary><table><thead><tr><th>เดือน</th><th>รายรับ</th><th>รายจ่าย</th></tr></thead><tbody>${months.map((m, i) => `<tr><td>${monthLabel(m)}</td><td>${fmtMoney(summaries[i].income)}</td><td>${fmtMoney(summaries[i].expense)}</td></tr>`).join("")}</tbody></table></details></div><div class="panel attention-panel"><div class="section-heading"><div><p class="eyebrow">ON YOUR RADAR</p><h2>เรื่องที่ต้องดูแล</h2></div><span class="radar-orb">${icon("sparkles")}</span></div><button class="attention-row" data-go="stock" data-workspace="inventory"><span class="attention-icon amber">${icon("box")}</span><span><strong>สินค้าใกล้หมด</strong><small>เช็กสต็อกก่อนพลาดการขาย</small></span><b>${low.length}<small>ตัวเลือก</small></b>${icon("chevron")}</button><button class="attention-row" data-go="stock" data-workspace="pending"><span class="attention-icon blue">${icon("clock")}</span><span><strong>สินค้ารอรับเข้า</strong><small>ยืนยันเมื่อสินค้าเดินทางมาถึง</small></span><b>${pendingOrders.length}<small>รายการ</small></b>${icon("chevron")}</button><button class="attention-row" data-go="installment"><span class="attention-icon violet">${icon("wallet")}</span><span><strong>ยอดรอรับชำระ</strong><small>จาก ${open.length} รายการผ่อนชำระ</small></span><b>${fmtMoney(balance)}</b>${icon("chevron")}</button><div class="attention-foot">${icon("check")}ข้อมูลสรุปจากรายการจริงของร้าน</div></div></section>`;
+  return `<section class="dashboard-grid"><div class="panel overview-chart"><div class="section-heading"><div><p class="eyebrow">CASH FLOW</p><h2>ความเคลื่อนไหวของร้าน</h2></div><button class="text-button" data-go="report">ดูรายงาน ${icon("arrow")}</button></div><div class="chart-legend"><span><i class="legend-dot blue"></i>รายรับ</span><span><i class="legend-dot lavender"></i>รายจ่าย</span><span class="period-label">6 เดือนล่าสุด</span></div><div class="cash-chart"><div class="chart-scale"><span>${fmtMoney(max)}</span><span>${fmtMoney(max / 2)}</span><span>฿0</span></div><div class="chart-plot"><svg viewBox="0 0 500 160" preserveAspectRatio="none" role="img" aria-label="กราฟรายรับและรายจ่าย 6 เดือนล่าสุด"><defs><linearGradient id="chart-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6f80ed" stop-opacity=".3"/><stop offset="100%" stop-color="#6f80ed" stop-opacity="0"/></linearGradient></defs><path d="M0 29H500M0 87H500M0 145H500" stroke="#b7c1d4" stroke-opacity=".35" stroke-dasharray="3 5"/><polygon points="0,155 ${line} 500,155" fill="url(#chart-fill)"/><polyline points="${expenseLine}" fill="none" stroke="#b19ccc" stroke-width="2.4" stroke-dasharray="5 5" vector-effect="non-scaling-stroke"/><polyline points="${line}" fill="none" stroke="#687ce5" stroke-width="3" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>${points.map(([x, y]) => `<circle cx="${x}" cy="${y}" r="3" fill="#687ce5"/>`).join("")}</svg><div class="chart-months">${months.map((m) => `<span>${monthLabel(m).split(" ")[0]}</span>`).join("")}</div></div></div><details class="chart-data"><summary>ดูตัวเลขรายเดือน</summary><table><thead><tr><th>เดือน</th><th>รายรับ</th><th>รายจ่าย</th></tr></thead><tbody>${months.map((m, i) => `<tr><td>${monthLabel(m)}</td><td>${fmtMoney(summaries[i].income)}</td><td>${fmtMoney(summaries[i].expense)}</td></tr>`).join("")}</tbody></table></details></div><div class="panel attention-panel"><div class="section-heading"><div><p class="eyebrow">ON YOUR RADAR</p><h2>เรื่องที่ต้องดูแล</h2></div><span class="radar-orb">${icon("sparkles")}</span></div><button class="attention-row" data-go="stock" data-workspace="inventory"><span class="attention-icon amber">${icon("box")}</span><span><strong>สินค้าใกล้หมด</strong><small>เช็กสต็อกก่อนพลาดการขาย</small></span><b>${low.length}<small>ตัวเลือก</small></b>${icon("chevron")}</button><button class="attention-row" data-go="stock" data-workspace="pending"><span class="attention-icon blue">${icon("clock")}</span><span><strong>สินค้ารอรับเข้า</strong><small>ยืนยันเมื่อสินค้าเดินทางมาถึง</small></span><b>${pendingOrders.length}<small>รายการ</small></b>${icon("chevron")}</button><button class="attention-row" data-go="installment"><span class="attention-icon violet">${icon("wallet")}</span><span><strong>ยอดรอรับชำระ</strong><small>จาก ${open.length} รายการผ่อนชำระ</small></span><b>${fmtMoney(balance)}</b>${icon("chevron")}</button><button class="attention-row" data-go="preorder"><span class="attention-icon blue">${icon("bag")}</span><span><strong>Pre-order ลูกค้า</strong><small>รายการรับจองที่ยังรอส่งมอบ</small></span><b>${preorders.filter(preorderOpen).length}<small>รายการ</small></b>${icon("chevron")}</button><div class="attention-foot">${icon("check")}ข้อมูลสรุปจากรายการจริงของร้าน</div></div></section>`;
 }
 function setupStockWorkspace(content) {
   const panels = [...content.children].filter((el) =>
@@ -2022,17 +2080,17 @@ document.getElementById("edit-form").onsubmit = async (e) => {
     showAlert("กรุณาระบุชื่อสินค้า");
     return;
   }
-  await editVariant(editingVariantId, {
+  const saved = await editVariant(editingVariantId, {
     name,
     color: (fd.get("color") || "").trim(),
     size: (fd.get("size") || "").trim(),
     type: fd.get("type"),
     cost: parseFloat(fd.get("cost")),
     price: parseFloat(fd.get("price")),
-    qty: parseInt(fd.get("qty"), 10),
+    qty: Number(fd.get("qty")),
     image,
   });
-  closeEdit();
+  if (saved) closeEdit();
 };
 
 // ---------- Stock tab ----------
@@ -3319,11 +3377,11 @@ function renderTxTab() {
       (t) => `
     <tr>
       <td class="num" style="font-family:'IBM Plex Mono',monospace;">${t.date}</td>
-      <td><span class="tag ${t.type}">${t.type === "income" ? "รายรับ" : t.type === "installment" ? "ผ่อนชำระ" : "รายจ่าย"}</span></td>
+      <td><span class="tag ${t.type}">${t.type === "income" ? "รายรับ" : t.type === "installment" ? "ผ่อนชำระ" : t.type === "preorder" ? "ยอดขาย pre-order" : "รายจ่าย"}</span></td>
       <td>${escapeHtml(t.category || "")}</td>
       <td>${escapeHtml(t.desc || "")}</td>
-      <td class="num" style="color:${t.type === "income" ? "var(--green)" : t.type === "installment" ? "var(--navy-3)" : "var(--red)"}">${t.type === "income" ? "+" : t.type === "installment" ? "" : "−"}${fmtMoney(t.amount)}</td>
-      <td><button class="btn-danger" data-txdel="${t.id}">ลบ</button></td>
+      <td class="num" style="color:${t.type === "income" ? "var(--green)" : ["installment", "preorder"].includes(t.type) ? "var(--navy-3)" : "var(--red)"}">${t.type === "income" ? "+" : ["installment", "preorder"].includes(t.type) ? "" : "−"}${fmtMoney(t.amount)}</td>
+      <td><button class="${t.preorderId ? "btn btn-ghost btn-sm" : "btn-danger"}" data-txdel="${escapeHtml(t.id)}" ${t.preorderId ? 'title="จัดการจากหน้า Pre-order ลูกค้า"' : ""}>${t.preorderId ? "ดู pre-order" : "ลบ"}</button></td>
     </tr>
   `,
     )
@@ -3370,6 +3428,7 @@ function renderTxTab() {
         ["income", "รายรับ"],
         ["expense", "รายจ่าย"],
         ["installment", "ผ่อนชำระ"],
+        ["preorder", "ยอดขาย pre-order (ไม่ใช่เงินรับเพิ่ม)"],
       ]
         .map(
           ([v, l]) =>
@@ -3457,7 +3516,11 @@ function wireTxTab() {
       });
     };
   document.querySelectorAll("[data-txdel]").forEach((btn) => {
-    btn.onclick = () => deleteTx(btn.dataset.txdel);
+    btn.onclick = () => {
+      const tx = transactions.find(item => item.id === btn.dataset.txdel);
+      if (tx?.preorderId) { preorderSearch = tx.preorderId; preorderFilter = "all"; navigateTo("preorder"); }
+      else deleteTx(btn.dataset.txdel);
+    };
   });
 }
 
@@ -3867,3 +3930,121 @@ window.addEventListener("hashchange", () => {
   if (tabMeta[location.hash.slice(1)]) navigateTo(location.hash.slice(1));
 });
 loadAll();
+
+// ---------- Customer pre-orders (not supplier stock purchases) ----------
+function preorderFields(order = {}) {
+  const field = (name, label, type = "text", attrs = "", value = order[name] ?? "") =>
+    `<div class="field"><label>${label}</label><input name="${name}" type="${type}" value="${escapeHtml(String(value))}" ${attrs}></div>`;
+  return `${field("customer", "ชื่อลูกค้า", "text", 'required maxlength="2000"')}
+    ${field("contact", "ช่องทางติดต่อ / เบอร์โทร", "text", 'maxlength="2000"')}
+    ${field("name", "สินค้าที่ลูกค้าสั่ง", "text", 'required maxlength="2000"')}
+    ${field("color", "สี", "text", 'maxlength="2000"')}
+    ${field("size", "ไซส์", "text", 'maxlength="2000"')}
+    <div class="field"><label>สภาพสินค้า</label><select name="type"><option value="new">มือหนึ่ง</option><option value="used" ${order.type === "used" ? "selected" : ""}>มือสอง</option></select></div>
+    ${field("qty", "จำนวน", "number", 'required min="1" step="1"', order.qty ?? 1)}
+    ${field("unitPrice", "ราคาขายต่อชิ้น (บาท)", "number", 'required min="0.01" max="1000000000000" step="0.01"')}
+    ${field("dueDate", "วันนัดส่ง (ไม่บังคับ)", "date")}
+    ${field("note", "หมายเหตุ / ที่อยู่จัดส่ง", "text", 'maxlength="2000"')}`;
+}
+function renderPreordersTab() {
+  const open = preorders.filter(preorderOpen);
+  const overdue = open.filter(order => order.dueDate && order.dueDate < todayStr());
+  const options = allVariants().map(({ product, variant }) => `<option value="${escapeHtml(variant.id)}">${escapeHtml(variantLabel(product, variant))} · เหลือ ${variant.qty}</option>`).join("");
+  const sorted = [...preorders].sort((a, b) => Number(preorderOpen(b)) - Number(preorderOpen(a)) || String(a.dueDate || "9999").localeCompare(b.dueDate || "9999") || b.createdAt.localeCompare(a.createdAt));
+  return `<section class="stats preorder-stats" aria-label="สรุป pre-order ลูกค้า">
+    ${metric("รอส่งมอบ", open.length, "รายการที่ลูกค้าพรีกับร้าน", "bag")}
+    ${metric("ยอดรอรับชำระ", fmtMoney(open.reduce((sum, order) => sum + preorderBalance(order), 0)), "เฉพาะ pre-order ที่ยังเปิดอยู่", "wallet")}
+    ${metric("เกินวันนัดส่ง", overdue.length, "ควรติดต่อแจ้งลูกค้า", "clock", overdue.length ? "expense-stat" : "")}
+    </section>
+    <div class="panel preorder-intro"><h2>รับพรีจากลูกค้า</h2><p class="hint">ใช้เมื่อมีลูกค้าสั่งสินค้ากับร้าน รับเงินได้หลายครั้งและติดตามจนส่งมอบ ส่วนสินค้าที่ร้านซื้อมาเก็บขายเองให้ใช้ “สั่งซื้อรอรับของ” ในหน้าสต็อก</p><p class="hint">รับจองยังไม่หักหรือกันสต็อก ยอดมัดจำเข้าบัญชีเมื่อรับเงินจริง และนับยอดขาย/กำไรเมื่อส่งมอบเท่านั้น</p>
+    <details id="preorder-create"><summary>+ เพิ่ม pre-order ลูกค้า</summary><form id="preorder-form"><div class="form-grid">${preorderFields()}<div class="field"><label>มัดจำที่รับแล้ว (บาท)</label><input name="deposit" type="number" min="0" step="0.01" value="0" required></div></div><p class="hint" id="preorder-quote" aria-live="polite">ระบุจำนวนและราคาต่อชิ้นเพื่อคำนวณยอด</p><button class="btn btn-primary" type="submit">บันทึก pre-order</button></form></details></div>
+    <div class="panel"><div class="section-heading"><h2>รายการ pre-order ลูกค้า</h2></div><div class="preorder-filters"><div class="field"><label for="preorder-search">ค้นหาลูกค้า สินค้า หรือรหัสรายการ</label><input id="preorder-search" type="search" value="${escapeHtml(preorderSearch)}" placeholder="ชื่อลูกค้า เบอร์โทร สินค้า…"></div><div class="field"><label for="preorder-filter">สถานะ</label><select id="preorder-filter">${Object.entries({ open: "รายการที่ยังเปิดอยู่", all: "ทุกสถานะ", overdue: "เกินวันนัดส่ง", ...preorderStatuses }).map(([value, label]) => `<option value="${value}" ${preorderFilter === value ? "selected" : ""}>${label}</option>`).join("")}</select></div><button id="preorder-clear" class="btn btn-ghost" type="button">ล้างตัวกรอง</button></div><p class="hint" id="preorder-count" role="status"></p>
+    <div class="preorder-list">${sorted.map(order => {
+      const isOpen = preorderOpen(order), late = isOpen && order.dueDate && order.dueDate < todayStr();
+      const id = escapeHtml(order.id);
+      const cash = transactions.filter(tx => tx.preorderId === order.id && ["income", "expense"].includes(tx.type));
+      return `<article class="preorder-card ${late ? "preorder-late" : ""}" data-preorder="${id}">
+        <div class="preorder-heading"><div><p class="eyebrow">PO · ${id}</p><h3>${escapeHtml(order.customer)}</h3><p>${escapeHtml(order.name)} · ${escapeHtml([order.color, order.size, order.type === "used" ? "มือสอง" : "มือหนึ่ง"].filter(Boolean).join(" / "))} ×${order.qty}</p></div><span class="tag ${order.status === "completed" ? "income" : order.status === "cancelled" ? "expense" : "preorder"}">${preorderStatuses[order.status]}</span></div>
+        <p class="hint">${escapeHtml(order.contact || "ไม่ได้ระบุช่องทางติดต่อ")} · รับจอง ${order.createdAt} · นัดส่ง ${order.dueDate || "ยังไม่ระบุ"}${late ? " · เกินกำหนดนัดส่ง" : ""}</p>
+        ${order.note ? `<p class="preorder-note">${escapeHtml(order.note)}</p>` : ""}
+        <div class="preorder-totals"><span>ยอดสั่งซื้อ<strong>${fmtMoney(preorderTotal(order))}</strong></span><span>รับแล้ว<strong>${fmtMoney(order.paidAmount)}</strong></span><span>${order.status === "cancelled" ? "คืนเงินแล้ว" : "ค้างชำระ"}<strong>${fmtMoney(order.status === "cancelled" ? order.refundedAmount : preorderBalance(order))}</strong></span></div>
+        ${isOpen ? `<div class="preorder-actions">${order.status !== "ready" ? `<button class="btn btn-primary btn-sm" data-preorder-action="status">${order.status === "awaiting" ? "ยืนยันว่าสั่งให้ลูกค้าแล้ว" : "สินค้าพร้อมส่งมอบแล้ว"}</button>` : ""}<button class="btn btn-ghost btn-sm danger-text" data-preorder-action="cancel">ยกเลิก${order.paidAmount ? "และบันทึกคืนเงิน" : "รายการ"}</button></div>
+        ${preorderBalance(order) > 0 ? `<form class="preorder-payment preorder-inline"><div class="field"><label>รับชำระเพิ่ม (บาท)</label><input name="amount" type="number" min="0.01" max="${preorderBalance(order)}" step="0.01" required></div><button class="btn btn-primary btn-sm" type="submit">บันทึกรับเงิน</button></form>` : '<p class="hint">ชำระครบแล้ว</p>'}
+        <details><summary>แก้ไขข้อมูลการจอง</summary><form class="preorder-edit"><div class="form-grid">${preorderFields(order)}</div><p class="hint">ยอดสั่งซื้อใหม่ต้องไม่น้อยกว่ายอดที่รับเงินแล้ว</p><button class="btn btn-ghost" type="submit">บันทึกการแก้ไข</button></form></details>
+        ${order.status === "ready" ? `<details class="preorder-delivery"><summary>ส่งมอบสินค้าและปิดรายการ</summary><form class="preorder-fulfill"><p class="hint">ต้องรับเงินครบก่อนส่งมอบ การส่งมอบจะบันทึกยอดขายและกำไร โดยไม่รับเงินซ้ำ</p><div class="form-grid"><div class="field"><label>วิธีส่งมอบ</label><select name="source"><option value="direct">ของที่จัดหาเฉพาะลูกค้า (ไม่ผ่านสต็อก)</option><option value="stock">นำสินค้าจากสต็อกของร้าน</option></select></div><div class="field preorder-stock-field" hidden><label>สินค้าที่ตัดสต็อก</label><select name="variantId" disabled required><option value="">เลือกสินค้า สี และไซส์ให้ตรงกับรายการจอง</option>${options}</select></div><div class="field preorder-direct-field"><label>ต้นทุนจริงต่อชิ้น (บาท)</label><input name="unitCost" type="number" min="0" step="0.01" required></div><div class="field"><label>ค่าส่งที่ร้านจ่าย (บาท)</label><input name="shipping" type="number" min="0" step="0.01" value="0" required></div><div class="field"><label>ค่ากลาง (บาท)</label><input name="commission" type="number" min="0" step="0.01" value="0" required></div></div><label class="preorder-cost-check preorder-direct-field"><input type="checkbox" name="costRecorded"> บันทึกรายจ่ายต้นทุนสินค้านี้ในบัญชีไปแล้ว</label><p class="hint">หากยังไม่เคยลงต้นทุน ระบบจะลงรายจ่ายวันนี้เมื่อส่งมอบ ค่าส่งและค่ากลางจะลงเพิ่มตามจำนวนที่ระบุ</p><button type="submit" class="btn btn-primary">ยืนยันส่งมอบสินค้า</button></form></details>` : ""}` : ""}
+        ${cash.length ? `<details><summary>ประวัติรับเงินและค่าใช้จ่าย (${cash.length})</summary><ul class="preorder-history">${cash.map(tx => `<li><span>${escapeHtml(tx.date)} · ${escapeHtml(tx.category)}</span><strong>${tx.type === "income" ? "+" : "−"}${fmtMoney(tx.amount)}</strong></li>`).join("")}</ul></details>` : ""}
+      </article>`;
+    }).join("")}</div><div class="empty" id="preorder-empty" hidden><div class="big">ไม่พบรายการ pre-order</div>เพิ่มรายการใหม่ หรือลองเปลี่ยนคำค้นหาและสถานะ</div></div>`;
+}
+async function performPreorderAction(id, action, data = {}) {
+  if (savingStores.size) return;
+  try {
+    const reviewedOrder = ["cancel", "fulfill"].includes(action)
+      ? copyData(preorders.find(item => item.id === id) || null)
+      : null;
+    if (action === "cancel") {
+      const order = preorders.find(item => item.id === id);
+      if (!order || !preorderOpen(order)) return;
+      if (!(await showConfirm(`ยกเลิก pre-order ของ ${order.customer}${order.paidAmount ? ` และยืนยันว่าได้คืนเงินลูกค้า ${fmtMoney(order.paidAmount)} แล้ว` : ""}? ระบบจะเก็บประวัติรายการไว้`))) return;
+    }
+    if (action === "fulfill" && !(await showConfirm("ยืนยันส่งมอบสินค้าให้ลูกค้าแล้ว? ระบบจะบันทึกยอดขาย ต้นทุน และตัดสต็อกตามวิธีที่เลือก"))) return;
+    if (reviewedOrder && JSON.stringify(reviewedOrder) !== JSON.stringify(preorders.find(item => item.id === id))) {
+      showAlert("รายการเปลี่ยนแปลงระหว่างยืนยัน กรุณาเปิดรายการล่าสุดและตรวจยอดอีกครั้ง");
+      return;
+    }
+    // Work on a copy so validation cannot partially mutate the live store.
+    const next = copyData(storeValues());
+    const context = { uid, today: todayStr(), validDate: validDateString };
+    if (action === "create") createPreorder(next, data, context);
+    else updatePreorder(next, id, action, data, context);
+    const names = action === "fulfill" ? ["preorders", "transactions", "products"] : ["preorders", "transactions"];
+    names.forEach(name => assignStore(name, next[name]));
+    await saveData(...names);
+    if (action === "create") { preorderSearch = ""; preorderFilter = "open"; }
+    render();
+  } catch (error) {
+    if (!error.storageReported) showAlert(error.message || "ดำเนินการไม่สำเร็จ");
+  }
+}
+function wirePreordersTab() {
+  const form = document.getElementById("preorder-form");
+  if (!form) return;
+  form.onsubmit = event => { event.preventDefault(); performPreorderAction(null, "create", Object.fromEntries(new FormData(form))); };
+  form.oninput = () => {
+    const data = Object.fromEntries(new FormData(form));
+    const total = Number(data.qty) * Number(data.unitPrice), deposit = Number(data.deposit || 0);
+    document.getElementById("preorder-quote").textContent = Number.isFinite(total) && total > 0 ? `ยอดสั่งซื้อ ${fmtMoney(total)} · ค้างชำระ ${fmtMoney(Math.max(0, total - deposit))}${deposit > total ? " · มัดจำเกินยอดสั่งซื้อ" : ""}` : "ระบุจำนวนและราคาต่อชิ้นเพื่อคำนวณยอด";
+  };
+  const search = document.getElementById("preorder-search"), filter = document.getElementById("preorder-filter");
+  const applyFilters = () => {
+    preorderSearch = search.value; preorderFilter = filter.value;
+    let count = 0;
+    document.querySelectorAll("[data-preorder]").forEach(card => {
+      const order = preorders.find(item => item.id === card.dataset.preorder);
+      const matches = normalizedText([order.id, order.customer, order.contact, order.name, order.color, order.size, order.note].join(" ")).includes(normalizedText(preorderSearch)) &&
+        (preorderFilter === "all" || (preorderFilter === "open" ? preorderOpen(order) : preorderFilter === "overdue" ? preorderOpen(order) && order.dueDate && order.dueDate < todayStr() : order.status === preorderFilter));
+      card.hidden = !matches; if (matches) count++;
+    });
+    document.getElementById("preorder-count").textContent = `แสดง ${count} จาก ${preorders.length} รายการ`;
+    document.getElementById("preorder-empty").hidden = count > 0;
+  };
+  search.oninput = filter.onchange = applyFilters;
+  document.getElementById("preorder-clear").onclick = () => { search.value = ""; filter.value = "all"; applyFilters(); };
+  applyFilters();
+  document.querySelectorAll("[data-preorder]").forEach(card => {
+    const id = card.dataset.preorder;
+    card.querySelectorAll("[data-preorder-action]").forEach(button => { button.onclick = () => performPreorderAction(id, button.dataset.preorderAction); });
+    for (const [selector, action] of [[".preorder-payment", "pay"], [".preorder-edit", "edit"], [".preorder-fulfill", "fulfill"]]) {
+      const actionForm = card.querySelector(selector);
+      if (actionForm) actionForm.onsubmit = event => { event.preventDefault(); performPreorderAction(id, action, Object.fromEntries(new FormData(actionForm))); };
+    }
+    const source = card.querySelector('[name="source"]');
+    if (source) source.onchange = () => {
+      card.querySelectorAll(".preorder-stock-field, .preorder-direct-field").forEach(field => {
+        const visible = field.classList.contains("preorder-stock-field") === (source.value === "stock");
+        field.hidden = !visible;
+        field.querySelectorAll("input,select").forEach(input => { input.disabled = !visible; });
+      });
+    };
+  });
+}
