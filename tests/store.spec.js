@@ -298,7 +298,7 @@ test('manual transaction and backup export/import preserve original features', a
   const chunks = [];
   for await (const chunk of stream) chunks.push(chunk);
   const backup = JSON.parse(Buffer.concat(chunks).toString());
-  expect(backup.version).toBe(9);
+  expect(backup.version).toBe(10);
   expect(backup.transactions[0].amount).toBe(1200);
 
   const imported = { version: 3, ...inventory(), transactions: [{ id: 'imported-tx', type: 'income', category: 'รายรับอื่นๆ', desc: 'นำเข้า', amount: 77, date: today() }] };

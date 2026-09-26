@@ -97,7 +97,7 @@ test('wallet backup and CSV round trip; malformed wallet and funding flags are r
  const s=seed();s.adWallet=[{id:'topup-1',amount:200,date:today(),note:'=bad'}];
  s.transactions=[{id:'spend-1',adCampaignId:'ad-1',adWalletFunded:true,type:'expense',category:'ค่าโฆษณาสินค้า',date:today(),amount:50,desc:'ใช้จริง'}];
  await boot(page,s);await nav(page,'ads');expect(await download(page,'#ad-wallet-export')).toContain("'=bad");
- await page.locator('.data-tools summary').click();const backup=JSON.parse(await download(page,'#export-btn'));expect(backup.adWallet).toEqual(s.adWallet);expect(backup.version).toBe(9);
+ await page.locator('.data-tools summary').click();const backup=JSON.parse(await download(page,'#export-btn'));expect(backup.adWallet).toEqual(s.adWallet);expect(backup.version).toBe(10);
  const upload=data=>page.locator('#import-input').setInputFiles({name:'wallet.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(data))});
  await upload(backup);await page.locator('#modal-ok-btn').click();await expectSaved(page,s=>s.adWallet?.length===1);
  for(const mutate of [b=>b.adWallet[0].amount=-1,b=>b.adWallet.push({...b.adWallet[0]}),b=>b.adCampaigns[0].dailyBudget=0,b=>b.transactions[0].adWalletFunded='yes']) {

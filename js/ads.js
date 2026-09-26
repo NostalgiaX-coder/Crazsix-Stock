@@ -7,8 +7,9 @@ export const isAdSpend = tx => tx.type === 'expense' && tx.category === 'ค่�
 const cash = value => Number.isFinite(value) && value >= 0 && value <= 1e12 && Math.abs(value * 100 - Math.round(value * 100)) < .001;
 const dateValid = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
 const textValid = (v, max, required = false) => typeof v === 'string' && v.length <= max && (!required || v.trim().length > 0);
-export function validateAdWallet(entries) {
-  return Array.isArray(entries) && entries.every(e => e && textValid(e.id,100,true) && !/[\s<>"'&]/.test(e.id) && cash(e.amount) && e.amount > 0 && dateValid(e.date) && textValid(e.note,500)) &&
+export function validateAdWallet(entries, campaigns = []) {
+  return Array.isArray(campaigns) && Array.isArray(entries) && entries.every(e => e && textValid(e.id,100,true) && !/[\s<>"'&]/.test(e.id) && cash(e.amount) && e.amount > 0 && dateValid(e.date) && textValid(e.note,500) &&
+    (e.campaignId == null ? e.budgetIncrease == null : campaigns.some(c=>c.id===e.campaignId) && e.budgetIncrease === e.amount)) &&
     new Set(entries.map(e => e.id)).size === entries.length && cash(money(entries.reduce((sum,e) => sum + e.amount,0)));
 }
 export function adWalletMetrics(entries, transactions) {
@@ -113,12 +114,27 @@ export function applyAdAction(state, action, id, today) {
     if (JSON.stringify(wallet) !== action.expectedWallet) throw new Error('ยอดเติมเงินเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุดแล้วลองอีกครั้ง');
     if (action.type === 'topup') {
       if (!dateValid(action.date) || action.date > today) throw new Error('วันที่เติมเงินต้องไม่เกินวันนี้');
-      wallet.unshift({id, amount:action.amount, date:action.date, note:action.note});
+      const entry = {id, amount:action.amount, date:action.date, note:action.note};
+      if (action.campaignId != null) {
+        const c = campaigns.find(c=>c.id===action.campaignId);
+        if (!c || JSON.stringify(c)!==action.expected) throw new Error('แคมเปญเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุด');
+        if (!cash(action.amount) || action.amount<=0 || !cash(money(c.budget+action.amount))) throw new Error('ยอดเติมเงินต้องมากกว่า 0 และมีทศนิยมไม่เกิน 2 ตำแหน่ง');
+        c.budget=money(c.budget+action.amount);
+        entry.campaignId=c.id; entry.budgetIncrease=action.amount;
+      }
+      wallet.unshift(entry);
     } else {
-      if (!wallet.some(e => e.id === action.entryId)) throw new Error('ไม่พบรายการเติมเงิน');
+      const entry=wallet.find(e=>e.id===action.entryId);
+      if (!entry) throw new Error('ไม่พบรายการเติมเงิน');
+      if (entry.campaignId) {
+        const c=campaigns.find(c=>c.id===entry.campaignId);
+        if (!c || JSON.stringify(c)!==action.expected) throw new Error('แคมเปญเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุด');
+        if (c.budget<entry.budgetIncrease) throw new Error('งบแคมเปญถูกปรับต่ำกว่ายอดเติมนี้แล้ว กรุณาตรวจงบก่อนลบรายการ');
+        c.budget=money(c.budget-entry.budgetIncrease);
+      }
       wallet = wallet.filter(e => e.id !== action.entryId);
     }
-    if (!validateAdWallet(wallet)) throw new Error('ยอดเติมเงินต้องมากกว่า 0 ทศนิยมไม่เกิน 2 ตำแหน่ง และหมายเหตุไม่เกิน 500 ตัวอักษร');
+    if (!validateAdWallet(wallet,campaigns)) throw new Error('ยอดเติมเงินต้องมากกว่า 0 ทศนิยมไม่เกิน 2 ตำแหน่ง และหมายเหตุไม่เกิน 500 ตัวอักษร');
     return {adCampaigns:campaigns, transactions, adWallet:wallet};
   }
   const campaign = campaigns.find(c => c.id === action.campaignId);
@@ -161,6 +177,7 @@ export function applyAdAction(state, action, id, today) {
       }
     }
   } else if (action.type === 'delete') {
+    if (wallet.some(e=>e.campaignId===campaign.id)) throw new Error('แคมเปญมีประวัติเติมเงินแล้ว ให้เปลี่ยนสถานะเพื่อเก็บประวัติ');
     if (transactions.some(tx => tx.adCampaignId === campaign.id)) throw new Error('แคมเปญมีค่าใช้จ่ายหรือยอดขายแล้ว ให้เปลี่ยนสถานะเป็นจบแคมเปญเพื่อเก็บประวัติ');
     campaigns = campaigns.filter(c => c.id !== campaign.id);
   } else throw new Error('ไม่รองรับคำสั่งนี้');

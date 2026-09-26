@@ -386,7 +386,7 @@ const savePending = () => saveData("pendingOrders");
 function exportData() {
   const payload = {
     exportedAt: new Date().toISOString(),
-    version: 9,
+    version: 10,
     products,
     transactions,
     pendingOrders,
@@ -507,7 +507,7 @@ function validateBackup(data) {
   const importedWallet = data.adWallet ?? [];
   const importedShipments = data.shipments ?? [];
   if (!validateShipments(importedShipments, data.transactions)) throw new Error("ข้อมูลการจัดส่งหรือสถานะรายการขายไม่ถูกต้อง");
-  if (!validateAdWallet(importedWallet)) throw new Error("ข้อมูลยอดเติมเงิน Ads Manager ไม่ถูกต้อง");
+  if (!validateAdWallet(importedWallet, importedAds)) throw new Error("ข้อมูลยอดเติมเงิน Ads Manager ไม่ถูกต้อง");
   if (!validateAdsBackup(importedAds, data.transactions, importedProducts)) throw new Error("ข้อมูลแคมเปญโฆษณาหรือรายการบัญชีที่ผูกไม่ถูกต้อง");
   return {
     adCampaigns: importedAds,

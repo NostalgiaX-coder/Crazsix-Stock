@@ -89,7 +89,7 @@ test('stale edits and confirmations reject changed campaign or ledger records',a
 });
 
 test('campaign backup round trips; malformed amounts, URLs and dangling attribution are rejected',async({page})=>{
- const state=seeded();await boot(page,state);await page.locator('.data-tools summary').click();const backup=JSON.parse(await exportText(page,'#export-btn'));expect(backup.version).toBe(9);expect(backup.adCampaigns).toEqual(state.adCampaigns);
+ const state=seeded();await boot(page,state);await page.locator('.data-tools summary').click();const backup=JSON.parse(await exportText(page,'#export-btn'));expect(backup.version).toBe(10);expect(backup.adCampaigns).toEqual(state.adCampaigns);
  const upload=async payload=>page.locator('#import-input').setInputFiles({name:'ads.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(payload))});
  await upload(backup);await page.locator('#modal-ok-btn').click();await expectSaved(page,db=>db.adCampaigns[0].id==='ad-1');
  for(const mutate of [s=>s.adCampaigns[0].reservePercent=101,s=>s.adCampaigns[0].budget=-1,s=>s.adCampaigns[0].url='javascript:alert(1)',s=>s.transactions[0].adCampaignId='missing',s=>s.adCampaigns[0].productId='missing',s=>s.adCampaigns.push({...s.adCampaigns[0]})]) {
