@@ -5,6 +5,7 @@ const path = require('node:path');
 const files = [
   'index.html', '404.html', 'css/styles.css',
   'js/app.js', 'js/theme.js', 'js/ads.js', 'js/ads-ui.js', 'js/preorders.js', 'js/store-tools.js', 'js/inventory-tools.js', 'js/firebase-config.js', 'js/firebase-service.js', 'js/ui-accessibility.js',
+  'js/shipments.js', 'js/shipments-ui.js',
   'assets/crazsix-logo.png', 'assets/crazsix-logo-banner.png'
 ];
 const root = path.resolve(__dirname, '..');

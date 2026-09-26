@@ -1,0 +1,18 @@
+const {test,expect}=require('@playwright/test');
+const {boot,nav,inventory,snapshot,expectSaved,today}=require('./helpers');
+const yesterday=()=>{const d=new Date(today()+'T12:00:00Z');d.setUTCDate(d.getUTCDate()-1);return d.toISOString().slice(0,10);};
+function seed(){const s=inventory();s.adCampaigns=[{id:'ad-1',name:'แอดเสื้อ',productId:'product-1',channel:'Facebook',status:'active',runMode:'until_budget',startDate:yesterday(),endDate:'',budget:1000,dailyBudget:100,targetQty:10,reservePercent:20,note:'',url:''}];s.adWallet=[{id:'topup',amount:500,date:yesterday(),note:''}];return s;}
+async function record(page,date,amount,source='wallet') {
+ await page.locator('.ad-spend-details > summary').click();const form=page.locator('.ad-spend-form');await form.locator('[name="date"]').fill(date);await form.locator('[name="amount"]').fill(amount);await form.locator('[name="paymentSource"]').selectOption(source);return form;
+}
+test('daily spending groups actual entries by campaign date, previews added totals and corrects both cost and wallet',async({page})=>{
+ await boot(page,seed());await nav(page,'ads');let form=await record(page,yesterday(),'120.25');await form.locator('button').click();await expectSaved(page,s=>s.transactions.length===1);
+ form=await record(page,today(),'50');await form.locator('button').click();await expectSaved(page,s=>s.transactions.length===2);
+ form=await record(page,today(),'25.75','direct');await expect(form.locator('.ad-day-preview')).toContainText('บันทึกแล้ว ฿50');await expect(form.locator('.ad-day-preview')).toContainText('รวมหลังบันทึก ฿75.75');await form.locator('button').click();await expectSaved(page,s=>s.transactions.length===3);
+ await expect(page.locator(`[data-ad-day="${today()}"] td`)).toHaveText([today(),'฿75.75','฿50','฿25.75']);await expect(page.locator(`[data-ad-day="${yesterday()}"] td`)).toHaveText([yesterday(),'฿120.25','฿120.25','฿0']);await expect(page.locator('[data-wallet-balance]')).toHaveText('฿329.75');
+ const waiting=page.waitForEvent('download');await page.locator('[data-ad-daily-export]').click();const chunks=[];for await(const chunk of await(await waiting).createReadStream())chunks.push(chunk);const csv=Buffer.concat(chunks).toString();expect(csv).toContain('75.75');expect(csv).toContain(yesterday());
+ await page.locator('.ad-spend-details > summary').click();await page.locator('[data-ad-remove-spend]').first().click();await page.locator('#modal-ok-btn').click();await expectSaved(page,s=>s.transactions.length===2);await expect(page.locator(`[data-ad-day="${today()}"] td`)).toHaveText([today(),'฿50','฿50','฿0']);expect((await snapshot(page)).adCampaigns[0].dailyBudget).toBe(100);
+});
+for(const width of [390,1440]) test(`daily expense form and table fit ${width}px`,async({page})=>{
+ await page.setViewportSize({width,height:900});const s=seed();s.adCampaigns.push({...s.adCampaigns[0],id:'ad-2',name:'แอดอีกตัว'});s.transactions=[{id:'spent',adCampaignId:'ad-1',adWalletFunded:true,type:'expense',category:'ค่าโฆษณาสินค้า',date:today(),amount:12.5,desc:'ใช้จริง'}];const errors=await boot(page,s);await nav(page,'ads');await expect(page.locator('[data-ad-id="ad-1"] .ad-daily-table')).toContainText('฿12.5');await expect(page.locator('[data-ad-id="ad-2"] .ad-daily-table')).toContainText('ยังไม่มีค่าแอดรายวัน');await page.locator('[data-ad-id="ad-1"] .ad-daily-section').screenshot({path:`test-results/ads-daily-${width}.png`});const d=await page.evaluate(()=>({w:document.documentElement.clientWidth,s:document.documentElement.scrollWidth}));expect(d.s).toBeLessThanOrEqual(d.w+1);expect(errors).toEqual([]);
+});

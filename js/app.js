@@ -1,4 +1,6 @@
-import { campaignProductIds, campaignHasProduct, campaignUntilBudget, productAdMetrics, validateAdsBackup, applyAdAction, isAdSpend } from "./ads.js";
+import { deliveryLabels, pendingDeliveries, validateShipments, applyShipmentAction } from "./shipments.js";
+import { renderShipments, wireShipments } from "./shipments-ui.js";
+import { campaignProductIds, campaignHasProduct, campaignUntilBudget, productAdMetrics, validateAdsBackup, validateAdWallet, applyAdAction, isAdSpend } from "./ads.js";
 import { renderAds, wireAds } from "./ads-ui.js";
 import { parseMeasurement, measurementsOf, validMeasurements, measurementLabel, stockOptionKey, assertStockRows, assertShipping, stockAdjustment, validAdjustments, allocateCashCosts } from "./inventory-tools.js";
 import { toCsv, cashSummary, followUpItems } from "./store-tools.js";
@@ -15,7 +17,9 @@ let transactions = [];
 let pendingOrders = [];
 let preorders = [];
 let adCampaigns = [];
-const STORE_NAMES = ["products", "transactions", "pendingOrders", "preorders", "adCampaigns"];
+let adWallet = [];
+let shipments = [];
+const STORE_NAMES = ["products", "transactions", "pendingOrders", "preorders", "adCampaigns", "adWallet", "shipments"];
 let preorderSearch = "";
 let preorderFilter = "open";
 let activeTab = "home";
@@ -175,7 +179,7 @@ let formDirty = false;
 let realtimeRenderPending = false;
 let realtimeRenderTimer = null;
 const copyData = (value) => JSON.parse(JSON.stringify(value));
-const storeValues = () => ({ products, transactions, pendingOrders, preorders, adCampaigns });
+const storeValues = () => ({ products, transactions, pendingOrders, preorders, adCampaigns, adWallet, shipments });
 function assignStore(name, value) {
   const list = Array.isArray(value) ? value : [];
   if (name === "products") products = list;
@@ -183,6 +187,8 @@ function assignStore(name, value) {
   if (name === "pendingOrders") pendingOrders = list;
   if (name === "preorders") preorders = list;
   if (name === "adCampaigns") adCampaigns = list;
+  if (name === "adWallet") adWallet = list;
+  if (name === "shipments") shipments = list;
 }
 function markRenderComplete() {
   formDirty = false;
@@ -380,12 +386,14 @@ const savePending = () => saveData("pendingOrders");
 function exportData() {
   const payload = {
     exportedAt: new Date().toISOString(),
-    version: 7,
+    version: 9,
     products,
     transactions,
     pendingOrders,
     preorders,
     adCampaigns,
+    adWallet,
+    shipments,
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], {
     type: "application/json",
@@ -496,9 +504,15 @@ function validateBackup(data) {
       throw new Error("ยอดเงินหรือสถานะ pre-order ไม่ตรงกับบัญชีในไฟล์สำรอง");
   }
   const importedAds = data.adCampaigns ?? [];
+  const importedWallet = data.adWallet ?? [];
+  const importedShipments = data.shipments ?? [];
+  if (!validateShipments(importedShipments, data.transactions)) throw new Error("ข้อมูลการจัดส่งหรือสถานะรายการขายไม่ถูกต้อง");
+  if (!validateAdWallet(importedWallet)) throw new Error("ข้อมูลยอดเติมเงิน Ads Manager ไม่ถูกต้อง");
   if (!validateAdsBackup(importedAds, data.transactions, importedProducts)) throw new Error("ข้อมูลแคมเปญโฆษณาหรือรายการบัญชีที่ผูกไม่ถูกต้อง");
   return {
     adCampaigns: importedAds,
+    adWallet: importedWallet,
+    shipments: importedShipments,
     preorders: importedPreorders,
     products: importedProducts,
     transactions: data.transactions,
@@ -525,6 +539,8 @@ async function handleImportFile(e) {
     pendingOrders = data.pendingOrders;
     preorders = data.preorders;
     adCampaigns = data.adCampaigns;
+    adWallet = data.adWallet;
+    shipments = data.shipments;
     await saveData(...STORE_NAMES);
     e.target.value = "";
     render();
@@ -1286,6 +1302,8 @@ async function sellVariant(variantId, data) {
   }
   const campaign = data.adCampaignId ? adCampaigns.find(c => c.id === data.adCampaignId && campaignHasProduct(c, product.id)) : null;
   if (data.adCampaignId && !campaign) { showAlert("ไม่พบแคมเปญของสินค้านี้ กรุณาเลือกใหม่"); return; }
+  const customerNote = String(data.customerNote || "").trim();
+  if (customerNote.length > 2000) { showAlert("ข้อมูลผู้รับต้องไม่เกิน 2,000 ตัวอักษร"); return; }
   variant.qty -= qty;
 
   const profit = money(revenue - variant.cost * qty - shipping - commission);
@@ -1313,6 +1331,7 @@ async function sellVariant(variantId, data) {
       commission,
       profit,
       stockProductId: product.id,
+      deliveryStatus: "pending",
       ...measurementsOf(variant),
       ...(campaign ? { adCampaignId: campaign.id } : {}),
       paidAmount: deposit,
@@ -1337,6 +1356,8 @@ async function sellVariant(variantId, data) {
       type: "income",
       category: "ขายสินค้า",
       desc: variantLabel(product, variant) + " x" + qty,
+      customerNote,
+      deliveryStatus: "pending",
       amount: revenue,
       date: todayStr(),
       productId: variant.id,
@@ -1375,6 +1396,7 @@ async function sellVariant(variantId, data) {
   }
   await saveData("products", "transactions", ...(campaign ? ["adCampaigns"] : []));
   render();
+  toast("บันทึกการขายแล้ว · สินค้าอยู่ในเมนูรอส่ง");
 }
 
 function openInstallments() {
@@ -1459,6 +1481,10 @@ function isManualTransaction(tx) {
 async function deleteTx(id) {
   const target = transactions.find((tx) => tx.id === id);
   if (!target) return;
+  if (shipments.some(s => s.items.some(i => i.saleId === id))) {
+    showAlert("รายการขายมีประวัติการจัดส่งแล้ว ไม่สามารถลบจากบัญชีได้ กรุณาตรวจสอบที่เมนูรอส่ง");
+    return;
+  }
   if (isAdSpend(target)) {
     showAlert("รายการค่าแอดผูกกับแคมเปญ กรุณาแก้ไขจากเมนูยิงแอดเพื่อให้ต้นทุนและกำไรตรงกัน");
     return;
@@ -1499,7 +1525,7 @@ async function deleteTx(id) {
 async function resetAll() {
   if (
     !(await showConfirm(
-      "ล้างข้อมูลสินค้า รายการรอรับ pre-order ลูกค้า แคมเปญยิงแอด และบัญชีทั้งหมด? การกระทำนี้ย้อนกลับไม่ได้",
+      "ล้างข้อมูลสินค้า รายการรอรับ pre-order ลูกค้า แคมเปญยิงแอด ประวัติเติมเงิน การจัดส่ง และบัญชีทั้งหมด? การกระทำนี้ย้อนกลับไม่ได้",
     ))
   )
     return;
@@ -1508,6 +1534,8 @@ async function resetAll() {
   pendingOrders = [];
   preorders = [];
   adCampaigns = [];
+  adWallet = [];
+  shipments = [];
   await saveData(...STORE_NAMES);
   render();
 }
@@ -1561,6 +1589,7 @@ const tabMeta = {
   ads: ["ยิงแอดและต้นทุนโฆษณา", "ยิงแอด", "chart", "ผูกสินค้า วางงบ ติดตามกำไร และเก็บเงินยิงแอดต่อ"],
   preorder: ["Pre-order ลูกค้า", "Pre-order ลูกค้า", "clock", "รับจอง ติดตามมัดจำ และส่งมอบสินค้าที่ลูกค้าพรีกับร้าน"],
   sell: ["ขายสินค้า", "ขายสินค้า", "bag", "พร้อมสำหรับออเดอร์ถัดไปของคุณ"],
+  shipments: ["จัดส่งสินค้า", "รอส่ง", "box", "รวมสินค้าที่ขายแล้ว เลือกหลายรายการ และบันทึกพัสดุที่ส่ง"],
   installment: [
     "ติดตามการผ่อนชำระ",
     "ผ่อนชำระ",
@@ -1676,7 +1705,7 @@ function render() {
       <nav class="tabs" aria-label="เมนูหลัก">${Object.entries(tabMeta)
         .map(
           ([key, item]) =>
-            `<button data-tab="${key}" aria-label="${item[1]}" title="${item[1]}" class="${activeTab === key ? "active" : ""}" ${activeTab === key ? 'aria-current="page"' : ""}>${icon(item[2])}<span>${item[1]}</span>${key === "installment" && openInstallments().length ? `<span class="nav-count">${openInstallments().length}</span>` : ""}</button>`,
+            `<button data-tab="${key}" aria-label="${item[1]}" title="${item[1]}" class="${activeTab === key ? "active" : ""}" ${activeTab === key ? 'aria-current="page"' : ""}>${icon(item[2])}<span>${item[1]}</span>${key === "installment" && openInstallments().length ? `<span class="nav-count">${openInstallments().length}</span>` : ""}${key === "shipments" && pendingDeliveries(transactions,shipments).length ? `<span class="nav-count">${pendingDeliveries(transactions,shipments).length}</span>` : ""}</button>`,
         )
         .join("")}</nav>
       <div class="sidebar-bottom"><div class="workspace-note">${icon("sparkles")}<strong>Small store. Big possibilities.</strong><p>ดูแลร้านให้คล่องตัว<br>มีเวลาให้สิ่งที่คุณรักมากขึ้น</p></div><div class="store-profile"><span class="avatar">C</span><div><strong>Crazsix Store</strong><small>ระบบจัดการร้านเสื้อผ้า</small></div><span class="online-dot" title="โหลดข้อมูลแล้ว"></span></div></div>
@@ -1711,12 +1740,14 @@ function render() {
   else if (activeTab === "preorder") content.innerHTML = renderPreordersTab();
   else if (activeTab === "ads") content.innerHTML = renderAds(storeValues(), { today: todayStr(), esc: escapeHtml, fmt: fmtMoney, metric });
   else if (activeTab === "sell") content.innerHTML = renderSellTab();
+  else if (activeTab === "shipments") content.innerHTML = renderShipments(storeValues(), {today:todayStr(), esc:escapeHtml, fmt:fmtMoney, metric});
   else if (activeTab === "installment")
     content.innerHTML = renderInstallmentsTab();
   else if (activeTab === "tx") content.innerHTML = renderTxTab();
   else if (activeTab === "report") content.innerHTML = renderRangeReport() + renderReportTab();
   else content.innerHTML = renderAiTab();
   wireAdsTab();
+  wireShipmentsTab();
   wireTasksTab();
   wireExportTools();
   wireHomeTab();
@@ -2001,10 +2032,9 @@ function renderHomeTab() {
           const parts = [];
           if (v.size) parts.push("ไซส์ " + escapeHtml(v.size));
           parts.push(v.type === "used" ? "มือ2" : "มือ1");
-          if (measurementLabel(v)) parts.push(escapeHtml(measurementLabel(v)));
           return `
         <div class="variant-row ${v.qty <= 0 ? "out" : ""} ${isLow ? "low" : ""}">
-          <div class="variant-info">${parts.join(" · ")}</div>
+          <div class="variant-info">${parts.join(" · ")}${renderMeasurementDetails(v)}</div>
           <div class="variant-qty">${v.qty}</div>
           <button class="btn btn-ghost btn-sm" data-stats="${v.id}">สถิติ</button>
         </div>
@@ -2038,7 +2068,7 @@ function renderHomeTab() {
               .map(
                 ({ variant: v }) => `
             <div class="variant-row out">
-              <div class="variant-info">${v.size ? "ไซส์ " + escapeHtml(v.size) : "-"} ${escapeHtml(measurementLabel(v))}</div>
+              <div class="variant-info">${v.size ? "ไซส์ " + escapeHtml(v.size) : "-"}${renderMeasurementDetails(v)}</div>
               <span class="tag soldout">หมดแล้ว</span>
               <button class="btn btn-ghost btn-sm" data-stats="${v.id}">สถิติ</button>
             </div>
@@ -2350,6 +2380,10 @@ function productBlockTemplate(idx) {
   `;
 }
 
+function renderMeasurementDetails(variant) {
+  return `<span class="size-measurements" aria-label="ขนาดจริงของตัวเลือกนี้"><span>อก ${variant.chestInches == null ? "ยังไม่ระบุ" : escapeHtml(variant.chestInches) + " นิ้ว"}</span><span>ยาว ${variant.lengthInches == null ? "ยังไม่ระบุ" : escapeHtml(variant.lengthInches) + " นิ้ว"}</span></span>`;
+}
+
 function renderStockRows(groups) {
   return groups
     .map((group) => {
@@ -2367,7 +2401,7 @@ function renderStockRows(groups) {
           const isSoldOut = v.qty <= 0;
           return `
       <div class="stock-size-item ${isSoldOut ? "soldout-item" : ""}" data-stock-variant="${escapeHtml(v.id)}">
-        <span>ไซส์ ${escapeHtml(v.size || "-")} · ${v.type === "new" ? "มือ1" : "มือ2"} · ${isSoldOut ? "สินค้าหมด" : v.qty + " ชิ้น"}${measurementLabel(v) ? `<small class="measurement-note">${escapeHtml(measurementLabel(v))}</small>` : ""}</span>
+        <span>ไซส์ ${escapeHtml(v.size || "-")} · ${v.type === "new" ? "มือ1" : "มือ2"} · ${isSoldOut ? "สินค้าหมด" : v.qty + " ชิ้น"}${renderMeasurementDetails(v)}</span>
         <span>${fmtMoney(v.cost)}</span>
         <button class="btn btn-ghost btn-sm" data-edit="${v.id}">แก้ไข</button>
         <button class="btn-danger" data-del="${v.id}">ลบ</button>
@@ -3394,7 +3428,7 @@ function renderSellTab() {
         <div class="sale-total" aria-live="polite"><span>ยอดขายรวม / กำไรประมาณ</span><b class="sale-total-value"></b></div>
         <button class="btn btn-gold btn-sm sell-submit" style="width:100%; margin-top:10px;" data-sell="${first.id}">${icon("bag")}บันทึกการขาย</button>
         <div class="checkline" style="margin-top:10px;"><input type="checkbox" class="sell-installment"><label>ลูกค้าผ่อนชำระ (ไม่ได้เงินก้อนเดียว)</label></div>
-        <div class="field sell-installment-fields" style="display:none; margin-top:6px;"><label>ผ่อนชำระให้ครบภายใน (วัน)</label><input class="sell-due-days" type="number" min="1" value="30"><label style="margin-top:6px;">มัดจำที่ได้รับตอนนี้ (ถ้ามี)</label><input class="sell-deposit" type="number" min="0" step="0.01" value="0"><label style="margin-top:6px;">ชื่อลูกค้า/บันทึกเพิ่มเติม</label><input class="sell-customer" type="text" placeholder="เช่น ชื่อลูกค้า, เบอร์โทร"></div>
+        <div class="field sell-installment-fields" style="display:none; margin-top:6px;"><label>ผ่อนชำระให้ครบภายใน (วัน)</label><input class="sell-due-days" type="number" min="1" value="30"><label style="margin-top:6px;">มัดจำที่ได้รับตอนนี้ (ถ้ามี)</label><input class="sell-deposit" type="number" min="0" step="0.01" value="0"></div><div class="field"><label>ลูกค้า / ผู้รับ / เลขคำสั่งซื้อ (ถ้ามี)</label><input class="sell-customer" type="text" maxlength="2000" placeholder="เช่น ชื่อลูกค้า, เบอร์โทร"><p class="hint">บันทึกการขายแล้วจะอยู่ในสถานะรอส่ง</p></div>
       </div>`;
     })
     .join("");
@@ -3408,8 +3442,8 @@ function renderSellTab() {
 
   return `
     <div class="panel">
-      <h2>เลือกสินค้าที่ต้องการขาย</h2>
-      <p class="hint">ใส่ราคาขายจริง ค่าส่ง และค่ากลาง (ถ้ามี) แล้วกด "กดขาย" ระบบจะตัดสต็อกและบันทึกรายรับ-กำไรให้อัตโนมัติ</p>
+      <div class="section-heading"><h2>เลือกสินค้าที่ต้องการขาย</h2><button class="btn btn-ghost" data-go="shipments">รอส่ง (${pendingDeliveries(transactions,shipments).length})</button></div>
+      <p class="hint">ใส่ราคาขายจริง ค่าส่ง และค่ากลาง (ถ้ามี) แล้วบันทึกการขาย ระบบจะตัดสต็อก บันทึกยอดขาย และนำสินค้าเข้ารอส่ง กดส่งสินค้าแล้วได้จากเมนูรอส่ง</p>
       <div class="inventory-toolbar"><div class="field search-field">${icon("search")}<input type="search" id="sell-search" aria-label="ค้นหาสินค้าพร้อมขาย" placeholder="ค้นหาสินค้าที่ต้องการขาย" value="${escapeHtml(sellSearch)}"></div><span id="sell-count" class="inventory-count"></span></div>
       <div id="sell-no-results" class="empty" hidden>ไม่พบสินค้าที่ตรงกับคำค้นหา</div>
       ${
@@ -3551,7 +3585,7 @@ function renderInstallmentsTab() {
     return `
       <tr class="${overdue ? "overdue-row" : ""}">
         <td class="num" style="font-family:'IBM Plex Mono',monospace;">${t.date}</td>
-        <td>${escapeHtml(t.desc || "")}</td>
+        <td>${escapeHtml(t.desc || "")}${t.deliveryStatus ? `<span class="tag preorder">${deliveryLabels[t.deliveryStatus] || ""}</span>` : ""}</td>
         <td class="num">${fmtMoney(t.amount)}</td>
         <td class="num" style="color:var(--green);">${fmtMoney(t.paidAmount || 0)}</td>
         <td class="num" style="color:${remaining > 0.001 ? "var(--red)" : "var(--green)"}; font-weight:700;">${fmtMoney(remaining)}</td>
@@ -3614,7 +3648,7 @@ function renderTxTab() {
       <td class="num" style="font-family:'IBM Plex Mono',monospace;">${t.date}</td>
       <td><span class="tag ${t.type}">${t.type === "income" ? "รายรับ" : t.type === "installment" ? "ผ่อนชำระ" : t.type === "preorder" ? "ยอดขาย pre-order" : "รายจ่าย"}</span></td>
       <td>${escapeHtml(t.category || "")}</td>
-      <td>${escapeHtml(t.desc || "")}</td>
+      <td>${escapeHtml(t.desc || "")}${t.deliveryStatus ? `<span class="tag preorder">${deliveryLabels[t.deliveryStatus] || ""}</span>` : ""}</td>
       <td class="num" style="color:${t.type === "income" ? "var(--green)" : ["installment", "preorder"].includes(t.type) ? "var(--navy-3)" : "var(--red)"}">${t.type === "income" ? "+" : ["installment", "preorder"].includes(t.type) ? "" : "−"}${fmtMoney(t.amount)}</td>
       <td>${isManualTransaction(t) ? `<button class="btn btn-ghost btn-sm" data-txedit="${escapeHtml(t.id)}">แก้ไข</button>` : ""}<button class="${t.preorderId ? "btn btn-ghost btn-sm" : "btn-danger"}" data-txdel="${escapeHtml(t.id)}" ${t.preorderId ? 'title="จัดการจากหน้า Pre-order ลูกค้า"' : ""}>${t.preorderId ? "ดู pre-order" : "ลบ"}</button></td>
     </tr>
@@ -4304,13 +4338,13 @@ let taskSearch = "";
 let taskFilter = "all";
 let reportFrom = "";
 let reportTo = "";
-const taskKinds = { ads: "แคมเปญยิงแอด", stock: "สต็อกใกล้หมด", supplier: "ร้านสั่งรอรับ", preorder: "Pre-order ลูกค้า", installment: "ผ่อนค้างชำระ" };
+const taskKinds = { shipment: "ขายแล้วรอส่ง", ads: "แคมเปญยิงแอด", stock: "สต็อกใกล้หมด", supplier: "ร้านสั่งรอรับ", preorder: "Pre-order ลูกค้า", installment: "ผ่อนค้างชำระ" };
 function renderTasksTab() {
   const items = followUpItems(storeValues(), todayStr(), LOW_STOCK_THRESHOLD);
   return `<section class="stats tasks-stats">${metric("งานทั้งหมด", items.length, "อัปเดตจากรายการปัจจุบัน", "check")}${metric("ควรจัดการก่อน", items.filter(item => item.priority === 0).length, "สินค้าหมด เกินวันนัด หรือแอดเกินงบ", "clock", "expense-stat")}</section>
     <div class="panel"><h2>งานที่ต้องติดตาม</h2><p class="hint">สินค้ารอรับคือร้านสั่งมาขายเอง ส่วน pre-order คือรายการที่ลูกค้าสั่งกับร้าน วันที่ในรายการรอรับเป็นวันสั่งซื้อ ส่วนรายการลูกค้าเป็นวันครบกำหนด</p>
     <div class="task-filters"><div class="field"><label>ค้นหางาน</label><input id="task-search" type="search" value="${escapeHtml(taskSearch)}" placeholder="สินค้า ลูกค้า หรือหมายเหตุ"></div><div class="field"><label>ประเภทงาน</label><select id="task-filter">${Object.entries({ all: "ทุกประเภท", urgent: "ควรจัดการก่อน", ...taskKinds }).map(([key, label]) => `<option value="${key}" ${taskFilter === key ? "selected" : ""}>${label}</option>`).join("")}</select></div></div><p class="hint" id="task-count" role="status"></p>
-    <div class="task-list">${items.map(item => `<article class="task-card" data-task-kind="${item.kind}" data-task-priority="${item.priority}"><div><span class="tag ${item.priority === 0 ? "expense" : "preorder"}">${taskKinds[item.kind]}</span><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.detail)}</p>${item.date ? `<p class="hint">${item.kind === "supplier" ? "สั่งเมื่อ" : "ครบกำหนด"} ${escapeHtml(item.date)}</p>` : ""}</div><button class="btn btn-ghost" data-task-target="${item.target}" data-task-id="${escapeHtml(item.id)}" data-task-workspace="${item.workspace || ""}">เปิดรายการ</button></article>`).join("")}</div><div class="empty" id="task-empty" hidden>ไม่มีงานที่ตรงกับตัวกรอง</div></div>`;
+    <div class="task-list">${items.map(item => `<article class="task-card" data-task-kind="${item.kind}" data-task-priority="${item.priority}"><div><span class="tag ${item.priority === 0 ? "expense" : "preorder"}">${taskKinds[item.kind]}</span><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.detail)}</p>${item.date ? `<p class="hint">${item.kind === "supplier" ? "สั่งเมื่อ" : item.kind === "shipment" ? "ขายเมื่อ" : "ครบกำหนด"} ${escapeHtml(item.date)}</p>` : ""}</div><button class="btn btn-ghost" data-task-target="${item.target}" data-task-id="${escapeHtml(item.id)}" data-task-workspace="${item.workspace || ""}">เปิดรายการ</button></article>`).join("")}</div><div class="empty" id="task-empty" hidden>ไม่มีงานที่ตรงกับตัวกรอง</div></div>`;
 }
 function wireTasksTab() {
   const search = document.getElementById("task-search"), filter = document.getElementById("task-filter");
@@ -4340,6 +4374,7 @@ function wireTasksTab() {
         const campaignCard = [...document.querySelectorAll('[data-ad-id]')].find(card => card.dataset.adId === id);
         if (campaignCard) { campaignCard.scrollIntoView({block:'start'}); campaignCard.querySelector('button')?.focus({preventScroll:true}); }
       }
+      if (target === "shipments") { const search = document.getElementById("shipment-search"); search.value = id; search.dispatchEvent(new Event("input")); }
       const trigger = [...document.querySelectorAll('[data-pay], [data-pending-id], [data-edit]')].find(el => (el.dataset.pay || el.dataset.pendingId || el.dataset.edit) === id);
       if (trigger) { trigger.scrollIntoView({ block: "center" }); trigger.focus({ preventScroll: true }); }
     };
@@ -4444,8 +4479,9 @@ function wireAdsTab() {
       if (savingStores.size) return;
       const next = applyAdAction(storeValues(), action, uid(), todayStr());
       adCampaigns = next.adCampaigns;
+      adWallet = next.adWallet;
       transactions = next.transactions;
-      await saveData("adCampaigns", "transactions", "products");
+      await saveData("adCampaigns", "transactions", "products", "adWallet");
       render();
     },
   });
@@ -4495,3 +4531,14 @@ function updateReportChartTheme() {
   }
 }
 window.addEventListener('themechange', updateReportChartTheme);
+
+function wireShipmentsTab() {
+  wireShipments(copyData(storeValues()), {confirm:showConfirm, alert:showAlert, csv:downloadCsv, commit:async action=>{
+    if (savingStores.size) return;
+    const next = applyShipmentAction(storeValues(),action,uid(),todayStr());
+    transactions = next.transactions; shipments = next.shipments;
+    await saveData("transactions","shipments");
+    render();
+    toast(action.type === "ship" ? "บันทึกส่งสินค้าแล้ว" : "คืนรายการเข้ารอส่งแล้ว");
+  }});
+}

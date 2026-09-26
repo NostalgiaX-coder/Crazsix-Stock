@@ -7,6 +7,26 @@ export const isAdSpend = tx => tx.type === 'expense' && tx.category === 'ค่�
 const cash = value => Number.isFinite(value) && value >= 0 && value <= 1e12 && Math.abs(value * 100 - Math.round(value * 100)) < .001;
 const dateValid = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
 const textValid = (v, max, required = false) => typeof v === 'string' && v.length <= max && (!required || v.trim().length > 0);
+export function validateAdWallet(entries) {
+  return Array.isArray(entries) && entries.every(e => e && textValid(e.id,100,true) && !/[\s<>"'&]/.test(e.id) && cash(e.amount) && e.amount > 0 && dateValid(e.date) && textValid(e.note,500)) &&
+    new Set(entries.map(e => e.id)).size === entries.length && cash(money(entries.reduce((sum,e) => sum + e.amount,0)));
+}
+export function adWalletMetrics(entries, transactions) {
+  const toppedUp = money(entries.reduce((sum,e) => sum + e.amount,0));
+  const spent = money(transactions.filter(tx => isAdSpend(tx) && tx.adWalletFunded === true).reduce((sum,tx) => sum + tx.amount,0));
+  return { toppedUp, spent, balance: money(toppedUp - spent) };
+}
+export function dailyAdSpend(campaignId, transactions) {
+  const days = new Map();
+  for (const tx of transactions.filter(tx => isAdSpend(tx) && tx.adCampaignId === campaignId)) {
+    const row = days.get(tx.date) || {date:tx.date, amount:0, wallet:0, direct:0, count:0};
+    row.amount = money(row.amount + tx.amount);
+    const source = tx.adWalletFunded ? 'wallet' : 'direct';
+    row[source] = money(row[source] + tx.amount); row.count++;
+    days.set(tx.date,row);
+  }
+  return [...days.values()].sort((a,b) => b.date.localeCompare(a.date));
+}
 export const safeAdUrl = value => { try { const url = new URL(value); return ['https:', 'http:'].includes(url.protocol) ? url.href : ''; } catch { return ''; } };
 export const campaignProductIds = c => Array.isArray(c?.productIds) ? c.productIds : c?.productId ? [c.productId] : [];
 export const campaignHasProduct = (c, id) => campaignProductIds(c).includes(id);
@@ -23,6 +43,7 @@ export function validateAdCampaign(c) {
     textValid(c.name, 120, true) && textValid(c.channel, 80, true) && Object.hasOwn(adStatuses, c.status) &&
     dateValid(c.startDate) && (c.runMode == null || ['dated', 'until_budget'].includes(c.runMode)) &&
     (campaignUntilBudget(c) ? c.endDate === '' : dateValid(c.endDate) && c.endDate >= c.startDate) && cash(c.budget) &&
+    (c.dailyBudget == null || (cash(c.dailyBudget) && c.dailyBudget > 0)) &&
     Number.isSafeInteger(c.targetQty) && c.targetQty > 0 && c.targetQty <= 1e9 &&
     Number.isFinite(c.reservePercent) && c.reservePercent >= 0 && c.reservePercent <= 100 &&
     textValid(c.note, 2000) && textValid(c.url, 2000) && (!c.url || Boolean(safeAdUrl(c.url)));
@@ -49,8 +70,10 @@ export function adMetrics(c, transactions, today) {
   const reserve = money(Math.max(0, cashNet) * c.reservePercent / 100);
   const days = campaignUntilBudget(c) ? null : daysBetween(c.startDate, c.endDate), daysLeft = days == null ? null : Math.max(0, daysBetween(today < c.startDate ? c.startDate : today, c.endDate));
   return { sales, expenses, spend, revenue, qty, grossProfit, net, cashNet, reserve, days, daysLeft,
+    spentToday: sum(expenses.filter(tx => tx.date === today), 'amount'),
     remaining: money(c.budget - spend), plannedPerUnit: c.budget / c.targetQty,
     actualPerUnit: qty ? spend / qty : null, daily: days == null ? null : c.budget / days,
+    estimatedDays: c.dailyBudget > 0 ? Math.max(0, money(c.budget - spend)) / c.dailyBudget : null,
     roas: spend ? revenue / spend : null, reservePerUnit: qty ? reserve / qty : 0,
   };
 }
@@ -68,6 +91,7 @@ export function productAdMetrics(product, campaigns, transactions, today) {
 export function validateAdsBackup(campaigns, transactions, products) {
   if (!Array.isArray(campaigns) || !campaigns.every(validateAdCampaign) || new Set(campaigns.map(c => c.id)).size !== campaigns.length || campaigns.some(c => campaignProductIds(c).some(id => !products.some(p => p.id === id)))) return false;
   return transactions.every(tx => {
+    if (tx.adWalletFunded != null && (typeof tx.adWalletFunded !== 'boolean' || !isAdSpend(tx))) return false;
     if (!tx.adCampaignId) return tx.adCampaignId == null && tx.adAllocations == null;
     const c = campaigns.find(c => c.id === tx.adCampaignId);
     if (!c) return false;
@@ -84,6 +108,19 @@ export function validateAdsBackup(campaigns, transactions, products) {
 // Returns new arrays only after all validations pass; caller commits them atomically.
 export function applyAdAction(state, action, id, today) {
   let campaigns = structuredClone(state.adCampaigns), transactions = structuredClone(state.transactions);
+  let wallet = structuredClone(state.adWallet || []);
+  if (['topup', 'removeTopup'].includes(action.type)) {
+    if (JSON.stringify(wallet) !== action.expectedWallet) throw new Error('ยอดเติมเงินเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุดแล้วลองอีกครั้ง');
+    if (action.type === 'topup') {
+      if (!dateValid(action.date) || action.date > today) throw new Error('วันที่เติมเงินต้องไม่เกินวันนี้');
+      wallet.unshift({id, amount:action.amount, date:action.date, note:action.note});
+    } else {
+      if (!wallet.some(e => e.id === action.entryId)) throw new Error('ไม่พบรายการเติมเงิน');
+      wallet = wallet.filter(e => e.id !== action.entryId);
+    }
+    if (!validateAdWallet(wallet)) throw new Error('ยอดเติมเงินต้องมากกว่า 0 ทศนิยมไม่เกิน 2 ตำแหน่ง และหมายเหตุไม่เกิน 500 ตัวอักษร');
+    return {adCampaigns:campaigns, transactions, adWallet:wallet};
+  }
   const campaign = campaigns.find(c => c.id === action.campaignId);
   if (action.type !== 'create' && (!campaign || JSON.stringify(campaign) !== action.expected)) throw new Error('แคมเปญเปลี่ยนแปลง กรุณาเปิดรายการล่าสุดแล้วลองอีกครั้ง');
   const selectedIds = campaignProductIds(action.type === 'create' ? action.values : campaign);
@@ -102,8 +139,9 @@ export function applyAdAction(state, action, id, today) {
     }
     campaigns = campaign ? campaigns.map(c => c.id === campaign.id ? next : c) : [next, ...campaigns];
   } else if (action.type === 'spend') {
+    if (action.adWalletFunded != null && typeof action.adWalletFunded !== 'boolean') throw new Error('แหล่งชำระค่าแอดไม่ถูกต้อง');
     if (!cash(action.amount) || action.amount <= 0 || !dateValid(action.date) || action.date > today || !textValid(action.note, 500)) throw new Error('ระบุค่าแอดที่จ่ายจริงมากกว่า 0 และวันที่จ่ายไม่เกินวันนี้');
-    transactions.unshift({ id, adCampaignId: campaign.id, type: 'expense', category: 'ค่าโฆษณาสินค้า', amount: action.amount, date: action.date, adAllocations: allocateAdSpend(action.amount, selectedIds), desc: `${campaign.name} · ${selectedProducts.map(p => p.name).join(', ')}${action.note ? ' · ' + action.note : ''}` });
+    transactions.unshift({ id, adCampaignId: campaign.id, adWalletFunded:action.adWalletFunded === true, type: 'expense', category: 'ค่าโฆษณาสินค้า', amount: action.amount, date: action.date, adAllocations: allocateAdSpend(action.amount, selectedIds), desc: `${campaign.name} · ${selectedProducts.map(p => p.name).join(', ')}${action.note ? ' · ' + action.note : ''}` });
   } else if (['link', 'unlink', 'removeSpend'].includes(action.type)) {
     const tx = transactions.find(t => t.id === action.transactionId);
     if (!tx || JSON.stringify(tx) !== action.expectedTransaction) throw new Error('รายการบัญชีเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุด');
@@ -126,5 +164,5 @@ export function applyAdAction(state, action, id, today) {
     if (transactions.some(tx => tx.adCampaignId === campaign.id)) throw new Error('แคมเปญมีค่าใช้จ่ายหรือยอดขายแล้ว ให้เปลี่ยนสถานะเป็นจบแคมเปญเพื่อเก็บประวัติ');
     campaigns = campaigns.filter(c => c.id !== campaign.id);
   } else throw new Error('ไม่รองรับคำสั่งนี้');
-  return { adCampaigns: campaigns, transactions };
+  return { adCampaigns: campaigns, transactions, adWallet:wallet };
 }

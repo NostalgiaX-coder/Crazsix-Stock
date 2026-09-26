@@ -20,7 +20,7 @@ async function exportText(page,selector) {const waiting=page.waitForEvent('downl
 test('campaign budgets plan unit costs; only actual spending affects cash and product profit', async ({page})=>{
  const errors=await boot(page);await create(page);
  let db=await snapshot(page);expect(db.transactions).toHaveLength(0);expect(db.products).toEqual(inventory().products);
- await expect(page.locator('.ad-metrics')).toContainText('฿30');
+ await expect(page.locator('.ad-card .ad-metrics')).toContainText('฿30');
  const form=await openSpend(page);await form.locator('[name="amount"]').fill('120');await form.locator('[name="note"]').fill('บิลรอบแรก');await form.locator('button').click();
  await expectSaved(page,db=>db.transactions.length===1);
  db=await snapshot(page);expect(db.transactions[0]).toMatchObject({amount:120,type:'expense',category:'ค่าโฆษณาสินค้า',adCampaignId:db.adCampaigns[0].id});
@@ -39,7 +39,7 @@ test('sale attribution records exactly once and computes net profit and the next
  const db=await snapshot(page);expect(db.products[0].variants[0].qty).toBe(6);expect(db.transactions.filter(t=>t.category==='ขายสินค้า')).toHaveLength(1);
  expect(db.transactions.find(t=>t.category==='ขายสินค้า')).toMatchObject({adCampaignId:'ad-1',profit:600,stockProductId:'product-1'});
  await nav(page,'ads');await expect(page.locator('.ad-reserve strong')).toHaveText('แนะนำแบ่งเก็บยิงแอดต่อ ฿80');
- await expect(page.locator('.ad-metrics')).toContainText('5.00 เท่า');
+ await expect(page.locator('.ad-card .ad-metrics')).toContainText('5.00 เท่า');
  await nav(page,'report');await expect(page.locator('#report-range-summary .val')).toHaveText(['฿1,000','฿200','฿800','฿600','฿200','฿400']);
  expect(errors).toEqual([]);
 });
@@ -89,7 +89,7 @@ test('stale edits and confirmations reject changed campaign or ledger records',a
 });
 
 test('campaign backup round trips; malformed amounts, URLs and dangling attribution are rejected',async({page})=>{
- const state=seeded();await boot(page,state);await page.locator('.data-tools summary').click();const backup=JSON.parse(await exportText(page,'#export-btn'));expect(backup.version).toBe(7);expect(backup.adCampaigns).toEqual(state.adCampaigns);
+ const state=seeded();await boot(page,state);await page.locator('.data-tools summary').click();const backup=JSON.parse(await exportText(page,'#export-btn'));expect(backup.version).toBe(9);expect(backup.adCampaigns).toEqual(state.adCampaigns);
  const upload=async payload=>page.locator('#import-input').setInputFiles({name:'ads.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(payload))});
  await upload(backup);await page.locator('#modal-ok-btn').click();await expectSaved(page,db=>db.adCampaigns[0].id==='ad-1');
  for(const mutate of [s=>s.adCampaigns[0].reservePercent=101,s=>s.adCampaigns[0].budget=-1,s=>s.adCampaigns[0].url='javascript:alert(1)',s=>s.transactions[0].adCampaignId='missing',s=>s.adCampaigns[0].productId='missing',s=>s.adCampaigns.push({...s.adCampaigns[0]})]) {

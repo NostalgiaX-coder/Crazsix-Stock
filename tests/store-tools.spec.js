@@ -67,7 +67,7 @@ test('follow-ups distinguish supplier stock, customer preorders and installments
   state.transactions.push({ id: 'debt', type: 'installment', desc: 'ผ่อนสินค้า', amount: 300, paidAmount: 100, date: today(), dueDate: '2020-01-01' });
   const errors = await boot(page, state);
   await nav(page, 'tasks');
-  await expect(page.locator('[data-task-kind]:visible')).toHaveCount(4);
+  await expect(page.locator('[data-task-kind]:visible')).toHaveCount(3);
   await page.screenshot({ path: 'test-results/tasks-desktop.png', fullPage: true });
   await page.locator('#task-filter').selectOption('urgent');
   await expect(page.locator('[data-task-kind]:visible')).toHaveCount(2);

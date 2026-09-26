@@ -6,6 +6,24 @@ async function rowFill(row,chest,length,qty='1'){await row.locator('.pbRowColor'
 async function fillNew(page){await page.locator('.pb-name').fill('เสื้อมือสอง');await radio(page,'.pb-type-toggle [value="used"]');await page.locator('.pb-price').fill('250');await page.locator('.pb-cost-perunit').fill('100');await rowFill(page.locator('.pb-size-row').first(),'22.5','28');}
 async function download(page,selector){const p=page.waitForEvent('download');await page.locator(selector).click();const chunks=[];for await(const c of await (await p).createReadStream())chunks.push(c);return Buffer.concat(chunks).toString();}
 
+test('each size row shows its own measurements and explicitly identifies missing dimensions', async ({page}) => {
+ const s = measured();
+ s.products[0].variants.push({...s.products[0].variants[0], id:'unmeasured', chestInches:null, lengthInches:null});
+ s.products[0].variants.push({...s.products[0].variants[0], id:'partial', qty:0, chestInches:24, lengthInches:null});
+ await boot(page,s);
+ await nav(page,'stock');
+ for (const [id,chest,length] of [['variant-1','22.5 นิ้ว','28 นิ้ว'],['variant-2','23 นิ้ว','29 นิ้ว'],['unmeasured','ยังไม่ระบุ','ยังไม่ระบุ'],['partial','24 นิ้ว','ยังไม่ระบุ']]) {
+   const row = page.locator(`[data-stock-variant="${id}"]`);
+   await expect(row).toContainText('ไซส์ M');
+   await expect(row.locator('.size-measurements')).toContainText(`อก ${chest}`);
+   await expect(row.locator('.size-measurements')).toContainText(`ยาว ${length}`);
+ }
+ await nav(page,'home');
+ await expect(page.locator('.variant-row').filter({hasText:'อก 22.5 นิ้ว'})).toContainText('ยาว 28 นิ้ว');
+ await expect(page.locator('.variant-row').filter({hasText:'อก 23 นิ้ว'})).toContainText('ยาว 29 นิ้ว');
+ await expect(page.locator('.variant-row').filter({hasText:'อก 24 นิ้ว'})).toContainText('ยาว ยังไม่ระบุ');
+});
+
 test('same used tag size supports different actual measurements while identical measurements combine',async({page})=>{
  const errors=await boot(page,{products:[],transactions:[],pendingOrders:[]});await mode(page);await fillNew(page);
  for(const [chest,length] of [['23','29'],['22.50','28'],['','']]){await page.locator('.add-pb-size-row').click();await rowFill(page.locator('.pb-size-row').last(),chest,length);}
@@ -38,7 +56,7 @@ test('failed measured item creation retains input and invalid later rows cannot 
 });
 
 test('stock search CSV and backup preserve inches and reject malformed imported measurements',async({page})=>{
- await boot(page,measured());await nav(page,'stock');await page.locator('#stock-search').fill('อก 22.5');await expect(page.locator('[data-stock-variant]:visible')).toHaveCount(1);const csv=await download(page,'#stock-export-filtered');expect(csv).toContain('อก (นิ้ว)');expect(csv).toContain('22.5');expect(csv).not.toContain('variant-2');await page.locator('.data-tools summary').click();const backup=JSON.parse(await download(page,'#export-btn'));expect(backup.version).toBe(7);const upload=async data=>page.locator('#import-input').setInputFiles({name:'measurements.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(data))});await upload(backup);await page.locator('#modal-ok-btn').click();await expectSaved(page,s=>s.products[0].variants[0].chestInches===22.5);
+ await boot(page,measured());await nav(page,'stock');await page.locator('#stock-search').fill('อก 22.5');await expect(page.locator('[data-stock-variant]:visible')).toHaveCount(1);const csv=await download(page,'#stock-export-filtered');expect(csv).toContain('อก (นิ้ว)');expect(csv).toContain('22.5');expect(csv).not.toContain('variant-2');await page.locator('.data-tools summary').click();const backup=JSON.parse(await download(page,'#export-btn'));expect(backup.version).toBe(9);const upload=async data=>page.locator('#import-input').setInputFiles({name:'measurements.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(data))});await upload(backup);await page.locator('#modal-ok-btn').click();await expectSaved(page,s=>s.products[0].variants[0].chestInches===22.5);
  for(const invalid of [-1,0,301,22.123,'22']){const bad=structuredClone(backup);bad.products[0].variants[0].chestInches=invalid;await upload(bad);await expect(page.locator('#modal-message')).toContainText('ไม่ถูกต้อง');await page.locator('#modal-ok-btn').click();expect((await snapshot(page)).products[0].variants[0].chestInches).toBe(22.5);}
 });
 

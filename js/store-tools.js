@@ -1,4 +1,5 @@
 import { adMetrics, campaignUntilBudget } from "./ads.js";
+import { pendingDeliveries } from "./shipments.js";
 // Shared, side-effect-free helpers for reports and store follow-ups.
 export function toCsv(rows) {
   const cell = value => {
@@ -23,10 +24,14 @@ export function cashSummary(transactions, from = '', to = '') {
   };
 }
 
-export function followUpItems({ products, pendingOrders, preorders, transactions, adCampaigns = [] }, today, threshold = 1) {
+export function followUpItems({ products, pendingOrders, preorders, transactions, adCampaigns = [], shipments = [] }, today, threshold = 1) {
   const rows = [];
+  for (const {sale,remaining} of pendingDeliveries(transactions,shipments)) rows.push({
+    kind:'shipment', id:sale.id, priority:1, title:sale.desc || 'ขายแล้วรอส่ง',
+    detail:`รอส่ง ${remaining} ชิ้น · ${sale.customerNote || 'ยังไม่ระบุผู้รับ'}`, date:sale.date, target:'shipments',
+  });
   for (const product of products) for (const variant of product.variants) {
-    if (variant.qty <= threshold) rows.push({
+    if (variant.type !== 'used' && variant.qty <= threshold) rows.push({
       kind: 'stock', id: variant.id, priority: variant.qty <= 0 ? 0 : 1,
       title: [product.name, variant.color, variant.size, variant.type === 'used' ? 'มือสอง' : 'มือหนึ่ง'].filter(Boolean).join(' · '),
       detail: `คงเหลือ ${variant.qty} ชิ้น`, date: '', target: 'stock', workspace: 'inventory',
