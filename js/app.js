@@ -1,3 +1,7 @@
+import { campaignProductIds, campaignHasProduct, campaignUntilBudget, productAdMetrics, validateAdsBackup, applyAdAction, isAdSpend } from "./ads.js";
+import { renderAds, wireAds } from "./ads-ui.js";
+import { parseMeasurement, measurementsOf, validMeasurements, measurementLabel, stockOptionKey, assertStockRows, assertShipping, stockAdjustment, validAdjustments, allocateCashCosts } from "./inventory-tools.js";
+import { toCsv, cashSummary, followUpItems } from "./store-tools.js";
 import { stockDatabase, firebaseConfigured } from "./firebase-service.js";
 import { money, preorderStatuses, preorderTotal, preorderOpen, preorderBalance, validatePreorder, createPreorder, updatePreorder } from "./preorders.js";
 
@@ -10,7 +14,8 @@ let products = [];
 let transactions = [];
 let pendingOrders = [];
 let preorders = [];
-const STORE_NAMES = ["products", "transactions", "pendingOrders", "preorders"];
+let adCampaigns = [];
+const STORE_NAMES = ["products", "transactions", "pendingOrders", "preorders", "adCampaigns"];
 let preorderSearch = "";
 let preorderFilter = "open";
 let activeTab = "home";
@@ -18,6 +23,7 @@ let loaded = false;
 let loadError = false;
 let stockSearch = "";
 let editingVariantId = null;
+let editingVariantSnapshot = null;
 let aiResult = null;
 let aiLoading = false;
 let aiError = null;
@@ -169,13 +175,14 @@ let formDirty = false;
 let realtimeRenderPending = false;
 let realtimeRenderTimer = null;
 const copyData = (value) => JSON.parse(JSON.stringify(value));
-const storeValues = () => ({ products, transactions, pendingOrders, preorders });
+const storeValues = () => ({ products, transactions, pendingOrders, preorders, adCampaigns });
 function assignStore(name, value) {
   const list = Array.isArray(value) ? value : [];
   if (name === "products") products = list;
   if (name === "transactions") transactions = list;
   if (name === "pendingOrders") pendingOrders = list;
   if (name === "preorders") preorders = list;
+  if (name === "adCampaigns") adCampaigns = list;
 }
 function markRenderComplete() {
   formDirty = false;
@@ -373,11 +380,12 @@ const savePending = () => saveData("pendingOrders");
 function exportData() {
   const payload = {
     exportedAt: new Date().toISOString(),
-    version: 4,
+    version: 7,
     products,
     transactions,
     pendingOrders,
     preorders,
+    adCampaigns,
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], {
     type: "application/json",
@@ -392,6 +400,9 @@ function exportData() {
   URL.revokeObjectURL(url);
 }
 
+function validCash(value) {
+  return Number.isFinite(value) && value >= 0 && value <= 1e12 && Math.abs(value - money(value)) < 1e-7;
+}
 function validDateString(value) {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value))
     return false;
@@ -404,12 +415,15 @@ function validInventoryRow(row) {
     typeof row.id === "string" &&
     row.id &&
     ["new", "used"].includes(row.type) &&
+    (row.color == null || typeof row.color === "string") &&
+    (row.size == null || typeof row.size === "string") &&
     Number.isInteger(row.qty) &&
     row.qty >= 0 &&
     Number.isFinite(row.cost) &&
     row.cost >= 0 &&
     Number.isFinite(row.price) &&
-    row.price >= 0
+    row.price >= 0 &&
+    validMeasurements(row) && validAdjustments(row.adjustments)
   );
 }
 function validateBackup(data) {
@@ -445,9 +459,10 @@ function validateBackup(data) {
       ["income", "expense", "installment", "preorder"].includes(tx.type) &&
       Number.isFinite(tx.amount) &&
       tx.amount >= 0 &&
-      validDateString(tx.date) &&
+      validDateString(tx.date) && validMeasurements(tx) &&
+      (tx.dueDate == null || validDateString(tx.dueDate)) &&
       (tx.paidAmount == null ||
-        (Number.isFinite(tx.paidAmount) && tx.paidAmount >= 0)),
+        (Number.isFinite(tx.paidAmount) && tx.paidAmount >= 0 && tx.paidAmount <= tx.amount)),
   );
   const validPending =
     Array.isArray(importedPending) &&
@@ -459,12 +474,14 @@ function validateBackup(data) {
         validDateString(row.orderDate),
     );
   const importedPreorders = data.preorders == null ? [] : data.preorders;
-  const uniqueIds = rows => rows.every(row => row && typeof row.id === "string" && row.id.trim()) && new Set(rows.map(row => row.id)).size === rows.length;
+  const uniqueIds = rows => rows.every(row => row && typeof row.id === "string" && row.id.trim() && !/[\s<>"\'&]/.test(row.id)) && new Set(rows.map(row => row.id)).size === rows.length;
   const validPreorders = Array.isArray(importedPreorders) && importedPreorders.every(row => validatePreorder(row, validDateString));
   if (!validProducts || !validTransactions || !validPending || !validPreorders)
     throw new Error("พบรายการสินค้า จำนวนเงิน หรือวันที่ไม่ถูกต้องในไฟล์สำรอง");
   const groups = [importedProducts, importedProducts.flatMap(product => product.variants), data.transactions, importedPending, importedPreorders];
-  if (!groups.every(uniqueIds)) throw new Error("พบรหัสรายการซ้ำหรือว่างในไฟล์สำรอง");
+  if (!groups.every(uniqueIds)) throw new Error("พบรหัสรายการซ้ำ ว่าง หรือมีอักขระที่ไม่รองรับในไฟล์สำรอง");
+  const productIds = new Set(importedProducts.map(product => product.id));
+  if (importedPending.some(order => order.productId != null && !productIds.has(order.productId))) throw new Error("รายการรอรับอ้างถึงสินค้าที่ไม่มีในไฟล์สำรอง");
   const preorderIds = new Set(importedPreorders.map(order => order.id));
   if (data.transactions.some(tx => (tx.preorderId && !preorderIds.has(tx.preorderId)) || (tx.type === "preorder" && !tx.preorderId)))
     throw new Error("รายการบัญชี pre-order ไม่มีคำสั่งซื้อที่ตรงกัน");
@@ -478,7 +495,10 @@ function validateBackup(data) {
         sales.some(tx => tx.amount !== preorderTotal(order) || tx.qty !== order.qty || !Number.isFinite(tx.profit)))
       throw new Error("ยอดเงินหรือสถานะ pre-order ไม่ตรงกับบัญชีในไฟล์สำรอง");
   }
+  const importedAds = data.adCampaigns ?? [];
+  if (!validateAdsBackup(importedAds, data.transactions, importedProducts)) throw new Error("ข้อมูลแคมเปญโฆษณาหรือรายการบัญชีที่ผูกไม่ถูกต้อง");
   return {
+    adCampaigns: importedAds,
     preorders: importedPreorders,
     products: importedProducts,
     transactions: data.transactions,
@@ -504,6 +524,7 @@ async function handleImportFile(e) {
     transactions = data.transactions;
     pendingOrders = data.pendingOrders;
     preorders = data.preorders;
+    adCampaigns = data.adCampaigns;
     await saveData(...STORE_NAMES);
     e.target.value = "";
     render();
@@ -593,6 +614,7 @@ function variantLabel(product, variant) {
   if (variant.color) parts.push(variant.color);
   if (variant.size) parts.push("ไซส์ " + variant.size);
   parts.push(variant.type === "used" ? "มือ2" : "มือ1");
+  if (measurementLabel(variant)) parts.push(measurementLabel(variant));
   return parts.join(" · ");
 }
 function productColorImage(product, color) {
@@ -698,19 +720,14 @@ function last6MonthsKeys() {
 // ---------- Actions ----------
 function addVariantCore(data) {
   const key = normalizedText(data.name);
-  let prod = products.find((p) => normalizedText(p.name) === key);
+  let prod = data.productId ? products.find(p => p.id === data.productId) : products.find((p) => normalizedText(p.name) === key);
   const color = (data.color || "").trim();
   const size = (data.size || "").trim();
   const type = data.type;
 
   if (prod) {
-    // สีและไซส์เป็นตัวระบุของตัวเลือกเดียวกัน เพื่อไม่ให้สร้างแถวซ้ำ
-    const existing = prod.variants.find(
-      (v) =>
-        normalizedText(v.color) === normalizedText(color) &&
-        normalizedText(v.size) === normalizedText(size) &&
-        v.type === type,
-    );
+    // Actual measurements distinguish items even when their tag size matches.
+    const existing = prod.variants.find(v => stockOptionKey(v) === stockOptionKey(data));
     if (existing) {
       // เจอตัวเลือกเดิม -> บวกจำนวนเข้าไป และเฉลี่ยต้นทุนถ่วงน้ำหนัก
       const totalOldValue = existing.qty * existing.cost;
@@ -729,6 +746,7 @@ function addVariantCore(data) {
       color,
       size,
       type,
+      ...measurementsOf(data),
       cost: data.cost,
       price: data.price,
       qty: data.qty,
@@ -743,6 +761,7 @@ function addVariantCore(data) {
       color,
       size,
       type,
+      ...measurementsOf(data),
       cost: data.cost,
       price: data.price,
       qty: data.qty,
@@ -763,6 +782,8 @@ function addVariantCore(data) {
 }
 
 async function addProductOrVariant(data) {
+  assertStockRows([data]);
+  assertShipping(Number(data.shippingIn || 0));
   const { prod, variant } = addVariantCore(data);
   let txAdded = false;
   if (data.logExpense && data.cost * data.qty > 0) {
@@ -796,8 +817,11 @@ async function addProductOrVariant(data) {
 
 // rows: [{name,color,size,type,price,cost,qty,image}]; base: {logExpense, shippingIn}
 async function addProductBatch(base, rows) {
+  assertStockRows(rows);
+  assertShipping(Number(base.shippingIn || 0));
   const created = rows.map((r) => ({
     ...addVariantCore({
+      ...measurementsOf(r),
       name: r.name,
       color: r.color,
       size: r.size,
@@ -812,14 +836,15 @@ async function addProductBatch(base, rows) {
   }));
   let txAdded = false;
   if (base.logExpense) {
-    created.forEach(({ prod, variant, addedQty, batchCost }) => {
-      if (batchCost * addedQty > 0) {
+    const costs = allocateCashCosts(created.map(item => item.batchCost * item.addedQty));
+    created.forEach(({ prod, variant, addedQty, batchCost }, index) => {
+      if (costs[index] > 0) {
         transactions.unshift({
           id: uid(),
           type: "expense",
           category: "ซื้อสินค้าเข้าสต็อก",
           desc: variantLabel(prod, variant),
-          amount: batchCost * addedQty,
+          amount: costs[index],
           date: todayStr(),
           productId: variant.id,
         });
@@ -848,6 +873,11 @@ async function addProductBatch(base, rows) {
 }
 
 async function attachShippingBulk(items, amount, date) {
+  if (!validCash(amount) || amount <= 0 || (date && !validDateString(date)) || !items.length ||
+      items.some(item => !Number.isSafeInteger(item.qty) || item.qty < 1 || !findVariant(item.variantId) || item.qty > findVariant(item.variantId).variant.qty)) {
+    showAlert("กรุณาตรวจจำนวนสินค้า ยอดค่าส่ง และวันที่ จำนวนแนบต้องไม่เกินสต็อกปัจจุบัน");
+    return;
+  }
   const labels = items.map((it) => it.label + " x" + it.qty);
   transactions.unshift({
     id: uid(),
@@ -868,13 +898,7 @@ function duplicateMergePreview() {
   const variantKeys = new Set(
     variants.map(
       ({ product, variant }) =>
-        normalizedText(product.name) +
-        "|" +
-        normalizedText(variant.color) +
-        "|" +
-        normalizedText(variant.size) +
-        "|" +
-        variant.type,
+        JSON.stringify([normalizedText(product.name), stockOptionKey(variant)]),
     ),
   );
   return {
@@ -886,6 +910,7 @@ function duplicateMergePreview() {
 async function mergeDuplicateData() {
   const mergedProducts = new Map();
   const idMap = new Map();
+  const productIdMap = new Map();
   let mergedVariants = 0;
   products.forEach((product) => {
     const productKey = normalizedText(product.name);
@@ -899,15 +924,11 @@ async function mergeDuplicateData() {
         variants: [],
       });
     const target = mergedProducts.get(productKey);
+    productIdMap.set(product.id, target.id);
     if (!target.image && product.image) target.image = product.image;
     Object.assign(target.colorImages, product.colorImages || {});
     product.variants.forEach((source) => {
-      const variantKey =
-        normalizedText(source.color) +
-        "|" +
-        normalizedText(source.size) +
-        "|" +
-        source.type;
+      const variantKey = stockOptionKey(source);
       let targetVariant = target.variants.find(
         (v) => v._mergeKey === variantKey,
       );
@@ -926,6 +947,7 @@ async function mergeDuplicateData() {
           ? (oldValue + addValue) / totalQty
           : Math.max(Number(targetVariant.cost) || 0, Number(source.cost) || 0);
       targetVariant.qty = totalQty;
+      if (source.adjustments?.length) targetVariant.adjustments = [...(targetVariant.adjustments || []), ...source.adjustments].sort((a, b) => a.date.localeCompare(b.date));
       if (source.price != null) targetVariant.price = Number(source.price) || 0;
       idMap.set(source.id, targetVariant.id);
       mergedVariants++;
@@ -939,6 +961,7 @@ async function mergeDuplicateData() {
   }));
   transactions = transactions.map((tx) => ({
     ...tx,
+    ...(tx.stockProductId ? { stockProductId: productIdMap.get(tx.stockProductId) || tx.stockProductId } : {}),
     ...(tx.productId !== undefined
       ? { productId: idMap.get(tx.productId) || tx.productId }
       : {}),
@@ -953,7 +976,20 @@ async function mergeDuplicateData() {
         }
       : {}),
   }));
-  await saveData("products", "transactions");
+  preorders = preorders.map(order => order.fulfillment?.variantId && idMap.has(order.fulfillment.variantId)
+    ? { ...order, fulfillment: { ...order.fulfillment, variantId: idMap.get(order.fulfillment.variantId) } } : order);
+  pendingOrders = pendingOrders.map(order => order.productId ? { ...order, productId: productIdMap.get(order.productId) || order.productId } : order);
+  adCampaigns = adCampaigns.map(c => {
+    const productIds = [...new Set(campaignProductIds(c).map(id => productIdMap.get(id) || id))];
+    return {...c, productId: productIds[0], productIds};
+  });
+  transactions.forEach(tx => {
+    if (!tx.adAllocations) return;
+    const shares = new Map();
+    tx.adAllocations.forEach(a => { const id = productIdMap.get(a.productId) || a.productId; shares.set(id, money((shares.get(id) || 0) + a.amount)); });
+    tx.adAllocations = [...shares].map(([productId,amount]) => ({productId,amount}));
+  });
+  await saveData("products", "transactions", "preorders", "pendingOrders", "adCampaigns");
   render();
   return mergedVariants;
 }
@@ -964,6 +1000,7 @@ function pendingLabel(po) {
   if (po.color) parts.push(po.color);
   if (po.size) parts.push("ไซส์ " + po.size);
   parts.push(po.type === "used" ? "มือ2" : "มือ1");
+  if (measurementLabel(po)) parts.push(measurementLabel(po));
   return parts.join(" · ");
 }
 
@@ -973,12 +1010,14 @@ function addPendingOrderCore(data) {
     name: data.name,
     color: data.color,
     size: data.size,
+    ...measurementsOf(data),
     type: data.type,
     cost: data.cost,
     price: data.price,
     qty: data.qty,
     image: data.image || null,
     orderDate: todayStr(),
+    ...(data.productId ? { productId: data.productId } : {}),
     note: (data.note || "").trim(),
   };
   pendingOrders.unshift(po);
@@ -987,8 +1026,9 @@ function addPendingOrderCore(data) {
 
 // rows: [{name,color,size,type,qty,cost,price}]; note: shared order note for all rows
 async function addPendingOrderBatch(rows, note) {
+  assertStockRows(rows);
   const created = rows.map((r) => addPendingOrderCore({ ...r, note }));
-  const totalCost = created.reduce((s, po) => s + po.cost * po.qty, 0);
+  const totalCost = money(created.reduce((s, po) => s + po.cost * po.qty, 0));
   if (totalCost > 0) {
     const desc = created
       .map((po) => pendingLabel(po) + " x" + po.qty)
@@ -1003,94 +1043,61 @@ async function addPendingOrderBatch(rows, note) {
       pendingIds: created.map((po) => po.id),
     });
   }
-  await saveData("pendingOrders", ...(totalCost > 0 ? ["transactions"] : []));
+  await saveData("pendingOrders", ...(rows.some(row => row.productId) ? ["products"] : []), ...(totalCost > 0 ? ["transactions"] : []));
   render();
 }
 
 async function receivePendingOrder(pendingId, shippingPaid) {
-  const idx = pendingOrders.findIndex((p) => p.id === pendingId);
-  if (idx === -1) return;
-  const po = pendingOrders[idx];
-  const { prod, variant } = addVariantCore({
-    name: po.name,
-    color: po.color,
-    size: po.size,
-    type: po.type,
-    cost: po.cost,
-    price: po.price,
-    qty: po.qty,
-    image: po.image,
-  });
-  pendingOrders.splice(idx, 1);
-  const shipAmt = parseFloat(shippingPaid) || 0;
-  if (shipAmt > 0) {
-    transactions.unshift({
-      id: uid(),
-      type: "expense",
-      category: "ค่าส่งสินค้าเข้า",
-      desc: variantLabel(prod, variant) + " (ค่าส่งตอนรับของ)",
-      amount: shipAmt,
-      date: todayStr(),
-      productId: variant.id,
-    });
-  }
-  await saveData(
-    "products",
-    "pendingOrders",
-    ...(shipAmt > 0 ? ["transactions"] : []),
-  );
-  render();
+  return receivePendingOrdersBulk([pendingId], shippingPaid);
 }
-async function receivePendingOrdersBulk(ids, shippingTotal) {
-  const receivedItems = [];
-  ids.forEach((id) => {
-    const idx = pendingOrders.findIndex((p) => p.id === id);
-    if (idx === -1) return;
-    const po = pendingOrders[idx];
-    const { prod, variant } = addVariantCore({
-      name: po.name,
-      color: po.color,
-      size: po.size,
-      type: po.type,
-      cost: po.cost,
-      price: po.price,
-      qty: po.qty,
-      image: po.image,
-    });
-    pendingOrders.splice(idx, 1);
-    receivedItems.push({ prod, variant, qty: po.qty });
+async function receivePendingOrdersBulk(ids, shippingTotal, quantities = {}) {
+  const shipAmt = Number(shippingTotal || 0);
+  const selected = [...new Set(ids)].map(id => pendingOrders.find(order => order.id === id));
+  if (!Number.isFinite(shipAmt) || shipAmt < 0 || Math.abs(shipAmt - money(shipAmt)) > 1e-7) {
+    showAlert("ค่าส่งต้องตั้งแต่ 0 และมีทศนิยมไม่เกิน 2 ตำแหน่ง");
+    return;
+  }
+  if (!selected.length || selected.some(order => !order || !Number.isSafeInteger(Number(quantities[order.id] ?? order.qty)) || Number(quantities[order.id] ?? order.qty) < 1 || Number(quantities[order.id] ?? order.qty) > order.qty)) {
+    showAlert("จำนวนรับต้องเป็นจำนวนเต็มตั้งแต่ 1 และไม่เกินจำนวนที่รอรับ กรุณาตรวจรายการล่าสุด");
+    return;
+  }
+  if (selected.some(po => po.productId && !products.some(p => p.id === po.productId))) {
+    showAlert("สินค้าเดิมของรายการรอรับถูกลบ กรุณากู้คืนสินค้าจากไฟล์สำรองก่อนรับของ");
+    return;
+  }
+  const receivedItems = selected.map(po => {
+    const qty = Number(quantities[po.id] ?? po.qty);
+    const { prod, variant } = addVariantCore({ ...po, name: products.find(p => p.id === po.productId)?.name || po.name, qty });
+    po.originalQty = po.originalQty ?? po.qty;
+    po.receivedQty = (po.receivedQty || 0) + qty;
+    po.qty -= qty;
+    return { prod, variant, qty };
   });
-  if (receivedItems.length === 0) return;
-  const shipAmt = parseFloat(shippingTotal) || 0;
+  pendingOrders = pendingOrders.filter(order => order.qty > 0);
   if (shipAmt > 0) {
-    const desc = receivedItems
-      .map(({ prod, variant, qty }) => variantLabel(prod, variant) + " x" + qty)
-      .join(", ");
     transactions.unshift({
-      id: uid(),
-      type: "expense",
-      category: "ค่าส่งสินค้าเข้า",
-      desc: desc + " (ค่าส่งตอนรับของ)",
-      amount: shipAmt,
-      date: todayStr(),
-      productId: null,
+      id: uid(), type: "expense", category: "ค่าส่งสินค้าเข้า",
+      desc: receivedItems.map(({ prod, variant, qty }) => variantLabel(prod, variant) + " x" + qty).join(", ") + " (ค่าส่งตอนรับของ)",
+      amount: shipAmt, date: todayStr(), productId: null,
     });
   }
-  await saveData(
-    "products",
-    "pendingOrders",
-    ...(shipAmt > 0 ? ["transactions"] : []),
-  );
+  await saveData("products", "pendingOrders", ...(shipAmt > 0 ? ["transactions"] : []));
   render();
 }
 
 async function deletePendingOrder(pendingId) {
+  const reviewed = JSON.stringify(pendingOrders.find(order => order.id === pendingId));
+  if (!reviewed) return;
   if (
     !(await showConfirm(
       "ยกเลิกรายการสั่งซื้อนี้? (ยอดที่จ่ายไปแล้วจะยังอยู่ในบัญชีรายจ่าย ไม่ถูกลบ)",
     ))
   )
     return;
+  if (reviewed !== JSON.stringify(pendingOrders.find(order => order.id === pendingId))) {
+    showAlert("รายการรอรับเปลี่ยนแปลงระหว่างยืนยัน กรุณาตรวจสอบอีกครั้ง");
+    return;
+  }
   pendingOrders = pendingOrders.filter((p) => p.id !== pendingId);
   await savePending();
   render();
@@ -1098,17 +1105,28 @@ async function deletePendingOrder(pendingId) {
 
 // เติมหลายตัวในล็อตเดียว โดยคิดต้นทุนเฉลี่ยถ่วงน้ำหนักให้แต่ละตัวเลือก
 async function restockVariants(rows, data) {
+  const prepared = rows.map(row => {
+    if (!row.newOption) {
+      const found = findVariant(row.variantId);
+      if (!found) throw new Error("สินค้าเดิมถูกลบ กรุณาเลือกสินค้าอีกครั้ง");
+      return { ...row, productId: found.product.id, name: found.product.name, color: found.variant.color || "", size: found.variant.size || "", type: found.variant.type, ...measurementsOf(found.variant), price: row.price ?? found.variant.price };
+    }
+    const product = products.find(product => product.id === row.productId);
+    if (!product) throw new Error("ไม่พบสินค้าเดิมที่เลือก กรุณาเลือกใหม่");
+    if (!row.color.trim() || !row.size.trim()) throw new Error("กรุณาระบุสีและไซส์ใหม่ให้ครบ");
+    return { ...row, name: product.name };
+  });
+  assertStockRows(prepared);
+  for (const row of prepared) {
+    const current = products.find(p => p.id === row.productId)?.variants.find(v => stockOptionKey(v) === stockOptionKey(row));
+    if (current && !Number.isSafeInteger(current.qty + row.qty)) throw new Error("จำนวนรวมมากเกินกว่าระบบรองรับ");
+  }
+  const keys = prepared.map(row => JSON.stringify([row.productId, stockOptionKey(row)]));
+  if (new Set(keys).size !== keys.length) throw new Error("เลือกสินค้า สี ไซส์ และสภาพซ้ำ กรุณารวมจำนวนไว้ในแถวเดียว");
+  assertShipping(Number(data.shippingIn || 0));
   const updated = [];
-  rows.forEach((row) => {
-    const found = findVariant(row.variantId);
-    if (!found) return;
-    const { product, variant } = found;
-    const totalOldValue = variant.qty * variant.cost;
-    const newQty = variant.qty + row.qty;
-    variant.cost =
-      newQty > 0 ? (totalOldValue + row.qty * row.cost) / newQty : row.cost;
-    variant.qty = newQty;
-    if (row.price != null && !isNaN(row.price)) variant.price = row.price;
+  prepared.forEach(row => {
+    const { prod: product, variant } = addVariantCore(row);
     updated.push({ product, variant, qty: row.qty, batchCost: row.cost });
   });
   if (updated.length === 0)
@@ -1116,14 +1134,15 @@ async function restockVariants(rows, data) {
 
   let txAdded = false;
   if (data.logExpense) {
-    updated.forEach(({ product, variant, qty, batchCost }) => {
-      if (batchCost * qty <= 0) return;
+    const costs = allocateCashCosts(updated.map(item => item.batchCost * item.qty));
+    updated.forEach(({ product, variant, qty, batchCost }, index) => {
+      if (costs[index] <= 0) return;
       transactions.unshift({
         id: uid(),
         type: "expense",
         category: "เติมสต๊อกสินค้าเดิม",
         desc: variantLabel(product, variant) + " +" + qty,
-        amount: batchCost * qty,
+        amount: costs[index],
         date: todayStr(),
         productId: variant.id,
       });
@@ -1157,16 +1176,32 @@ async function editVariant(variantId, data) {
   const found = findVariant(variantId);
   if (!found) return;
   if (!data.name.trim() || !["new", "used"].includes(data.type) ||
-      !Number.isSafeInteger(data.qty) || data.qty < 0 ||
+      !validMeasurements(data) || !Number.isSafeInteger(data.qty) || data.qty < 0 ||
       ![data.cost, data.price].every(value => Number.isFinite(value) && value >= 0)) {
-    showAlert("กรุณาระบุชื่อสินค้า จำนวนเต็มตั้งแต่ 0 และราคา/ต้นทุนที่ถูกต้อง");
+    showAlert("กรุณาระบุชื่อสินค้า จำนวนเต็มตั้งแต่ 0 ราคา/ต้นทุนที่ถูกต้อง และขนาด 0.01–300 นิ้ว (ทศนิยมไม่เกิน 2 ตำแหน่ง หรือเว้นว่าง)");
     return false;
   }
   const { product, variant } = found;
+  if (editingVariantSnapshot && JSON.stringify({ name: product.name, variant }) !== editingVariantSnapshot) {
+    showAlert("สินค้าเปลี่ยนแปลงระหว่างแก้ไข กรุณาปิดแล้วเปิดข้อมูลล่าสุดอีกครั้ง");
+    return false;
+  }
+  const duplicate = product.variants.some(v => v.id !== variantId && stockOptionKey(v) === stockOptionKey(data));
+  if (duplicate || products.some(p => p.id !== product.id && normalizedText(p.name) === normalizedText(data.name))) {
+    showAlert("ชื่อสินค้าหรือตัวเลือกสี/ไซส์/สภาพซ้ำและขนาดจริงตรงกัน กรุณาใช้เติมสต็อกหรือรวมข้อมูลซ้ำแทน");
+    return false;
+  }
+  if (variant.qty !== data.qty) {
+    try {
+      const entry = stockAdjustment(variant, data.qty, variant.qty, data.reason, uid(), new Date().toISOString());
+      variant.adjustments = [...(variant.adjustments || []), entry];
+    } catch (error) { showAlert(error.message); return false; }
+  }
   product.name = data.name.trim();
   setProductColorImage(product, data.color, data.image);
   variant.color = data.color;
   variant.size = data.size;
+  Object.assign(variant, measurementsOf(data));
   variant.type = data.type;
   variant.cost = data.cost;
   variant.price = data.price;
@@ -1177,15 +1212,30 @@ async function editVariant(variantId, data) {
 }
 
 async function deleteVariant(variantId) {
-  if (!(await showConfirm("ลบสินค้านี้ออกจากสต็อก?"))) return;
+  const reviewed = findVariant(variantId);
+  if (!reviewed) return;
+  if (reviewed.product.variants.length === 1 && pendingOrders.some(order => order.productId === reviewed.product.id)) {
+    showAlert("สินค้านี้มีรายการสั่งซื้อรอรับ กรุณารับของหรือยกเลิกรายการรอรับก่อนลบสินค้า");
+    return;
+  }
+  if (reviewed.product.variants.length === 1 && adCampaigns.some(c => campaignHasProduct(c, reviewed.product.id))) {
+    showAlert("สินค้านี้มีแคมเปญยิงแอดผูกอยู่ กรุณาเก็บสินค้าไว้เพื่อรักษาประวัติต้นทุนโฆษณา");
+    return;
+  }
+  const snapshot = JSON.stringify(reviewed.variant);
+  if (!(await showConfirm(`ลบ ${variantLabel(reviewed.product, reviewed.variant)} ออกจากสต็อก? คงเหลือ ${reviewed.variant.qty} ชิ้น ประวัติปรับยอดของตัวเลือกนี้จะถูกลบ รายการบัญชีเดิมยังคงอยู่`))) return;
   const found = findVariant(variantId);
-  if (!found) return;
+  if (!found || JSON.stringify(found.variant) !== snapshot) {
+    showAlert("สินค้าเปลี่ยนแปลงระหว่างยืนยัน กรุณาตรวจสอบข้อมูลล่าสุด");
+    return;
+  }
   const { product } = found;
+  if (product.variants.length === 1 && (adCampaigns.some(c => campaignHasProduct(c, product.id)) || pendingOrders.some(o => o.productId === product.id))) { showAlert("สินค้ามีรายการที่ผูกเพิ่มระหว่างยืนยัน กรุณาตรวจสอบข้อมูลล่าสุด"); return; }
   product.variants = product.variants.filter((v) => v.id !== variantId);
   if (product.variants.length === 0) {
     products = products.filter((p) => p.id !== product.id);
   }
-  await saveProducts();
+  await saveData("products", "pendingOrders", "adCampaigns");
   render();
 }
 
@@ -1212,14 +1262,14 @@ async function sellVariant(variantId, data) {
     showAlert("สินค้าคงเหลือไม่พอ (เหลือ " + variant.qty + " ชิ้น)");
     return;
   }
-  if (!Number.isFinite(sellPrice) || sellPrice <= 0) {
+  if (!validCash(sellPrice) || sellPrice <= 0 || !validCash(money(sellPrice * qty))) {
     showAlert("ระบุราคาขายจริงให้ถูกต้อง");
     return;
   }
   if (
-    !Number.isFinite(shipping) ||
+    !validCash(shipping) ||
     shipping < 0 ||
-    !Number.isFinite(commission) ||
+    !validCash(commission) ||
     commission < 0
   ) {
     showAlert("ค่าส่งและค่ากลางต้องเป็นตัวเลขตั้งแต่ 0 ขึ้นไป");
@@ -1229,11 +1279,13 @@ async function sellVariant(variantId, data) {
   const revenue = money(sellPrice * qty);
   const deposit = Number(data.deposit || 0);
   const dueDays = Number(data.dueDays || 30);
-  if (isInstallment && (!Number.isFinite(deposit) || deposit < 0 || deposit > revenue ||
+  if (isInstallment && (!validCash(deposit) || deposit < 0 || deposit > revenue ||
       !Number.isSafeInteger(dueDays) || dueDays < 1 || dueDays > 3650)) {
     showAlert("มัดจำต้องตั้งแต่ 0 และไม่เกินยอดขาย วันครบกำหนดต้องเป็นจำนวนเต็ม 1–3650 วัน");
     return;
   }
+  const campaign = data.adCampaignId ? adCampaigns.find(c => c.id === data.adCampaignId && campaignHasProduct(c, product.id)) : null;
+  if (data.adCampaignId && !campaign) { showAlert("ไม่พบแคมเปญของสินค้านี้ กรุณาเลือกใหม่"); return; }
   variant.qty -= qty;
 
   const profit = money(revenue - variant.cost * qty - shipping - commission);
@@ -1260,6 +1312,9 @@ async function sellVariant(variantId, data) {
       shipping,
       commission,
       profit,
+      stockProductId: product.id,
+      ...measurementsOf(variant),
+      ...(campaign ? { adCampaignId: campaign.id } : {}),
       paidAmount: deposit,
       dueDate: addDaysStr(data.dueDays),
       customerNote: note,
@@ -1291,6 +1346,9 @@ async function sellVariant(variantId, data) {
       shipping,
       commission,
       profit,
+      stockProductId: product.id,
+      ...measurementsOf(variant),
+      ...(campaign ? { adCampaignId: campaign.id } : {}),
     });
   }
   if (shipping > 0) {
@@ -1315,7 +1373,7 @@ async function sellVariant(variantId, data) {
       productId: variant.id,
     });
   }
-  await saveData("products", "transactions");
+  await saveData("products", "transactions", ...(campaign ? ["adCampaigns"] : []));
   render();
 }
 
@@ -1332,7 +1390,7 @@ async function recordInstallmentPayment(saleTxId, amountStr) {
   if (!sale) return false;
   const amount = Number(amountStr);
   const remaining = sale.amount - (sale.paidAmount || 0);
-  if (!Number.isFinite(amount) || amount <= 0) {
+  if (!validCash(amount) || amount <= 0) {
     showAlert("ระบุจำนวนเงินให้ถูกต้อง");
     return false;
   }
@@ -1358,7 +1416,7 @@ async function recordInstallmentPayment(saleTxId, amountStr) {
 
 async function addManualTx(data) {
   if (
-    !Number.isFinite(data.amount) ||
+    !validCash(data.amount) ||
     data.amount <= 0 ||
     !["income", "expense"].includes(data.type)
   ) {
@@ -1369,8 +1427,9 @@ async function addManualTx(data) {
     showAlert("ระบุวันที่ให้ถูกต้อง");
     return;
   }
-  transactions.unshift({
-    id: uid(),
+  const transaction = {
+    id: editingTransaction?.id || uid(),
+    source: "manual",
     type: data.type,
     category:
       data.category ||
@@ -1378,14 +1437,32 @@ async function addManualTx(data) {
     desc: data.desc,
     amount: data.amount,
     date: data.date || todayStr(),
-  });
+  };
+  if (editingTransaction) {
+    const index = transactions.findIndex(tx => tx.id === editingTransaction.id);
+    if (index < 0 || JSON.stringify(transactions[index]) !== JSON.stringify(editingTransaction) || !isManualTransaction(transactions[index])) {
+      showAlert("รายการบัญชีเปลี่ยนแปลงแล้ว กรุณาเปิดรายการล่าสุดก่อนแก้ไข");
+      return;
+    }
+    transactions[index] = transaction;
+  } else transactions.unshift(transaction);
   await saveTx();
+  editingTransaction = null;
   render();
+}
+
+function isManualTransaction(tx) {
+  return ["income", "expense"].includes(tx.type) && !tx.adCampaignId && !tx.productId && !tx.installmentId && !tx.preorderId && !tx.items && !tx.pendingIds && tx.profit == null &&
+    (tx.source === "manual" || !["ขายสินค้า", "ค่าส่งสินค้าเข้า", "สั่งซื้อสินค้า (รอของมาส่ง)", "ค่าส่ง", "ค่ากลาง"].includes(tx.category));
 }
 
 async function deleteTx(id) {
   const target = transactions.find((tx) => tx.id === id);
   if (!target) return;
+  if (isAdSpend(target)) {
+    showAlert("รายการค่าแอดผูกกับแคมเปญ กรุณาแก้ไขจากเมนูยิงแอดเพื่อให้ต้นทุนและกำไรตรงกัน");
+    return;
+  }
   if (target.preorderId) {
     showAlert("รายการนี้ผูกกับ pre-order กรุณาจัดการหรือยกเลิกจากหน้า Pre-order ลูกค้า เพื่อให้ยอดเงินตรงกัน");
     return;
@@ -1394,10 +1471,15 @@ async function deleteTx(id) {
     target.type === "installment"
       ? transactions.filter((tx) => tx.installmentId === id)
       : [];
+  const reviewed = JSON.stringify([target, linkedPayments]);
   const message = linkedPayments.length
     ? `ลบรายการผ่อนนี้และรายการรับชำระที่เกี่ยวข้อง ${linkedPayments.length} รายการ? สต็อกสินค้าจะไม่เปลี่ยนแปลง`
-    : "ลบรายการนี้?";
+    : (target.productId || target.items || target.pendingIds || target.category === "ขายสินค้า") && !target.installmentId ? "ลบรายการบัญชีนี้? จำนวนสต็อกจะไม่เปลี่ยนแปลง และระบบจะไม่คืนเงินให้อัตโนมัติ" : "ลบรายการนี้?";
   if (!(await showConfirm(message))) return;
+  if (reviewed !== JSON.stringify([transactions.find(tx => tx.id === id), target.type === "installment" ? transactions.filter(tx => tx.installmentId === id) : []])) {
+    showAlert("รายการบัญชีเปลี่ยนแปลงระหว่างยืนยัน กรุณาตรวจสอบอีกครั้ง");
+    return;
+  }
   if (target.installmentId) {
     const sale = transactions.find(
       (tx) => tx.id === target.installmentId && tx.type === "installment",
@@ -1417,7 +1499,7 @@ async function deleteTx(id) {
 async function resetAll() {
   if (
     !(await showConfirm(
-      "ล้างข้อมูลสินค้า รายการรอรับ pre-order ลูกค้า และบัญชีทั้งหมด? การกระทำนี้ย้อนกลับไม่ได้",
+      "ล้างข้อมูลสินค้า รายการรอรับ pre-order ลูกค้า แคมเปญยิงแอด และบัญชีทั้งหมด? การกระทำนี้ย้อนกลับไม่ได้",
     ))
   )
     return;
@@ -1425,6 +1507,7 @@ async function resetAll() {
   transactions = [];
   pendingOrders = [];
   preorders = [];
+  adCampaigns = [];
   await saveData(...STORE_NAMES);
   render();
 }
@@ -1468,12 +1551,14 @@ const tabMeta = {
     "home",
     "ทุกความเคลื่อนไหวของร้าน ในที่เดียว",
   ],
+  tasks: ["งานที่ต้องติดตาม", "งานที่ต้องติดตาม", "check", "รวมสต็อก ของรอรับ ออเดอร์ลูกค้า และยอดค้างไว้ในหน้าเดียว"],
   stock: [
     "สต็อกสินค้า",
     "สต็อกสินค้า",
     "box",
     "จัดการสินค้า เติมสต็อก และรับสินค้าเข้า",
   ],
+  ads: ["ยิงแอดและต้นทุนโฆษณา", "ยิงแอด", "chart", "ผูกสินค้า วางงบ ติดตามกำไร และเก็บเงินยิงแอดต่อ"],
   preorder: ["Pre-order ลูกค้า", "Pre-order ลูกค้า", "clock", "รับจอง ติดตามมัดจำ และส่งมอบสินค้าที่ลูกค้าพรีกับร้าน"],
   sell: ["ขายสินค้า", "ขายสินค้า", "bag", "พร้อมสำหรับออเดอร์ถัดไปของคุณ"],
   installment: [
@@ -1503,9 +1588,13 @@ const tabMeta = {
 };
 let stockWorkspace = "inventory";
 let inventorySearch = "";
+let inventoryStatus = "all";
+let inventoryCondition = "all";
+let inventorySort = "name";
 let homeFilter = "all";
 let sellSearch = "";
 let txSearch = "";
+let editingTransaction = null;
 let txTypeFilter = "all";
 let txMonthFilter = "";
 function icon(name, extra = "") {
@@ -1541,10 +1630,15 @@ function icon(name, extra = "") {
 }
 function navigateTo(tab, workspace) {
   activeTab = tabMeta[tab] ? tab : "home";
+  if (activeTab !== "tx") editingTransaction = null;
   if (workspace) stockWorkspace = workspace;
   history.replaceState(null, "", "#" + activeTab);
   render();
   window.scrollTo({ top: 0, behavior: "instant" });
+}
+function themeToggle() {
+  const dark = document.documentElement.dataset.theme !== "light";
+  return `<button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="${dark}" aria-label="${dark ? "เปลี่ยนเป็นโหมดสว่าง" : "เปลี่ยนเป็นโหมดมืด"}" title="${dark ? "เปลี่ยนเป็นโหมดสว่าง" : "เปลี่ยนเป็นโหมดมืด"}"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path class="theme-moon" d="M20 14a8 8 0 0 1-10-10A8.5 8.5 0 1 0 20 14Z"/><g class="theme-sun"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5"/></g></svg><span class="theme-toggle-label">${dark ? "โหมดมืด" : "โหมดสว่าง"}</span></button>`;
 }
 function metric(label, value, note, symbol, tone = "") {
   return `<div class="stat glass ${tone}"><div class="stat-top"><span class="lbl">${label}</span><span class="stat-icon">${icon(symbol)}</span></div><div class="val">${value}</div><div class="stat-note">${note}</div></div>`;
@@ -1561,6 +1655,8 @@ function render() {
       };
     return;
   }
+  if (trendChartInstance) { trendChartInstance.destroy(); trendChartInstance = null; }
+  if (sellersChartInstance) { sellersChartInstance.destroy(); sellersChartInstance = null; }
   if (typeof markRenderComplete === "function") markRenderComplete();
   const ms = monthSummary(todayStr().slice(0, 7));
   const meta = tabMeta[activeTab] || tabMeta.home;
@@ -1586,11 +1682,11 @@ function render() {
       <div class="sidebar-bottom"><div class="workspace-note">${icon("sparkles")}<strong>Small store. Big possibilities.</strong><p>ดูแลร้านให้คล่องตัว<br>มีเวลาให้สิ่งที่คุณรักมากขึ้น</p></div><div class="store-profile"><span class="avatar">C</span><div><strong>Crazsix Store</strong><small>ระบบจัดการร้านเสื้อผ้า</small></div><span class="online-dot" title="โหลดข้อมูลแล้ว"></span></div></div>
     </aside>
     <main class="main-content" id="main-content">
-      <div class="topbar"><div class="breadcrumb">Workspace <span>/</span> <strong>${meta[1]}</strong></div><div class="topbar-right"><span class="sync-status"><span class="online-dot"></span>เชื่อมต่อแล้ว</span><span class="topbar-date">${icon("calendar")}${dateLabel}</span><span class="avatar avatar-small">C</span></div></div>
+      <div class="topbar"><div class="breadcrumb">Workspace <span>/</span> <strong>${meta[1]}</strong></div><div class="topbar-right">${themeToggle()}<span class="sync-status"><span class="online-dot"></span>เชื่อมต่อแล้ว</span><span class="topbar-date">${icon("calendar")}${dateLabel}</span><span class="avatar avatar-small">C</span></div></div>
       <header class="page-header"><div><p class="eyebrow">${activeTab === "home" ? "YOUR STORE, AT A GLANCE" : "CRAZSIX STORE"}</p><h1>${meta[0]}<span class="heading-dot">.</span></h1><p class="subline">${meta[3]}</p></div><div class="header-actions"><button class="btn btn-ghost" data-go="stock" data-workspace="add">${icon("plus")}เพิ่มสินค้า</button><button class="btn btn-primary" data-go="sell">${icon("bag")}บันทึกการขาย</button></div></header>
       ${activeTab === "home" ? `<section class="stats" aria-label="สรุปร้านเดือนนี้">${metric("มูลค่าสต็อก", fmtMoney(stockValue()), `${products.length} สินค้า · คงเหลือ ${totalQty.toLocaleString("th-TH")} ชิ้น`, "box")}${metric("รายรับเดือนนี้", fmtMoney(ms.income), "เงินที่รับแล้วในเดือนนี้", "up", "income-stat")}${metric("รายจ่ายเดือนนี้", fmtMoney(ms.expense), "รวมต้นทุนซื้อเข้าและค่าใช้จ่าย", "down", "expense-stat")}${metric("เงินสุทธิเดือนนี้", fmtMoney(ms.profit), "รายรับ − รายจ่าย", "wallet", "profit")}</section>` : ""}
       <div id="tab-content" class="tab-content"></div>
-      <footer><span>CRAZSIX <span class="footer-dot">•</span> Your everyday store companion</span><details class="data-tools"><summary>จัดการข้อมูล ${icon("chevron")}</summary><div class="footer-actions"><button id="export-btn">${icon("download")}สำรองข้อมูล</button><button id="import-btn">${icon("upload")}นำเข้าข้อมูล</button><button id="reset-btn" class="danger-text">ล้างข้อมูลทั้งหมด</button></div></details><input type="file" id="import-input" accept=".json,application/json" hidden></footer>
+      <footer><span>CRAZSIX <span class="footer-dot">•</span> Your everyday store companion</span><details class="data-tools"><summary>จัดการข้อมูล ${icon("chevron")}</summary><div class="footer-actions"><button id="export-btn">${icon("download")}สำรองข้อมูล</button><button id="import-btn">${icon("upload")}นำเข้าข้อมูล</button><button data-export="inventory">ส่งออกสต็อก CSV</button><button data-export="transactions">ส่งออกบัญชี CSV</button><button data-export="preorders">ส่งออก pre-order CSV</button><button id="reset-btn" class="danger-text">ล้างข้อมูลทั้งหมด</button></div></details><input type="file" id="import-input" accept=".json,application/json" hidden></footer>
     </main>`;
   document
     .querySelectorAll("nav.tabs button")
@@ -1608,18 +1704,24 @@ function render() {
   document.getElementById("import-btn").onclick = () =>
     document.getElementById("import-input").click();
   const content = document.getElementById("tab-content");
-  if (activeTab === "home")
+  if (activeTab === "tasks") content.innerHTML = renderTasksTab();
+  else if (activeTab === "home")
     content.innerHTML = renderDashboard() + renderHomeTab();
   else if (activeTab === "stock") content.innerHTML = renderStockTab();
   else if (activeTab === "preorder") content.innerHTML = renderPreordersTab();
+  else if (activeTab === "ads") content.innerHTML = renderAds(storeValues(), { today: todayStr(), esc: escapeHtml, fmt: fmtMoney, metric });
   else if (activeTab === "sell") content.innerHTML = renderSellTab();
   else if (activeTab === "installment")
     content.innerHTML = renderInstallmentsTab();
   else if (activeTab === "tx") content.innerHTML = renderTxTab();
-  else if (activeTab === "report") content.innerHTML = renderReportTab();
+  else if (activeTab === "report") content.innerHTML = renderRangeReport() + renderReportTab();
   else content.innerHTML = renderAiTab();
+  wireAdsTab();
+  wireTasksTab();
+  wireExportTools();
   wireHomeTab();
   wireStockTab();
+  wireProductAds();
   wireSellTab();
   wirePreordersTab();
   wireInstallmentsTab();
@@ -1657,11 +1759,16 @@ function setupStockWorkspace(content) {
   const panels = [...content.children].filter((el) =>
     el.classList.contains("panel"),
   );
+  const countPanel = document.createElement("section");
+  countPanel.className = "panel";
+  countPanel.innerHTML = renderStocktake();
+  content.append(countPanel);
   const workspaces = [
     ["inventory", "รายการสินค้า", panels[3]],
     ["add", "เพิ่ม / เติมสต็อก", panels[0]],
     ["pending", `รอรับของ (${pendingOrders.length})`, panels[1]],
     ["shipping", "บันทึกค่าส่ง", panels[2]],
+    ["count", "ตรวจนับสต็อก", countPanel],
   ];
   const nav = document.createElement("div");
   nav.className = "workspace-tabs";
@@ -1680,6 +1787,10 @@ function setupStockWorkspace(content) {
     toolbar.className = "inventory-toolbar";
     toolbar.innerHTML = `<div class="field search-field">${icon("search")}<input id="stock-search" type="search" aria-label="ค้นหาสต็อกสินค้า" placeholder="ค้นหาชื่อสินค้า สี หรือไซส์" value="${escapeHtml(inventorySearch)}"></div><span class="inventory-count" id="stock-filter-count" role="status"></span>`;
     inventory.querySelector(".panel-title-action").after(toolbar);
+    const controls = document.createElement("div");
+    controls.className = "stock-filters";
+    controls.innerHTML = `<div class="field"><label>สถานะสต็อก</label><select id="stock-status">${Object.entries({all:"ทุกสถานะ",available:"มีสินค้า",low:"ใกล้หมด (1 ชิ้น)",out:"หมด / ติดลบ"}).map(([key,label]) => `<option value="${key}" ${inventoryStatus === key ? "selected" : ""}>${label}</option>`).join("")}</select></div><div class="field"><label>สภาพ</label><select id="stock-condition"><option value="all">ทั้งหมด</option><option value="new" ${inventoryCondition === "new" ? "selected" : ""}>มือหนึ่ง</option><option value="used" ${inventoryCondition === "used" ? "selected" : ""}>มือสอง</option></select></div><div class="field"><label>เรียงตาม</label><select id="stock-sort">${Object.entries({name:"ชื่อสินค้า",qty:"จำนวนน้อยก่อน",value:"มูลค่าสูงก่อน"}).map(([key,label]) => `<option value="${key}" ${inventorySort === key ? "selected" : ""}>${label}</option>`).join("")}</select></div><button class="btn btn-ghost btn-sm" id="stock-clear">ล้างตัวกรอง</button><button class="btn btn-ghost btn-sm" id="stock-export-filtered">ส่งออกที่แสดง CSV</button><p class="hint" id="stock-visible-totals" role="status"></p>`;
+    toolbar.after(controls);
     const empty = document.createElement("div");
     empty.className = "empty";
     empty.textContent = "ไม่พบสินค้าที่ตรงกับคำค้นหา";
@@ -1688,25 +1799,54 @@ function setupStockWorkspace(content) {
     const search = toolbar.querySelector("input");
     function filter() {
       inventorySearch = search.value;
-      let count = 0;
-      inventory.querySelectorAll("tbody tr").forEach((row) => {
-        row.hidden = !normalizedText(row.textContent).includes(
-          normalizedText(inventorySearch),
-        );
-        if (!row.hidden) count++;
+      inventoryStatus = controls.querySelector("#stock-status").value;
+      inventoryCondition = controls.querySelector("#stock-condition").value;
+      inventorySort = controls.querySelector("#stock-sort").value;
+      const lookup = new Map(allVariants().map(item => [item.variant.id, item]));
+      let count = 0, qty = 0, value = 0;
+      inventory.querySelectorAll("tbody tr").forEach(row => {
+        const visible = [];
+        row.querySelectorAll("[data-stock-variant]").forEach(item => {
+          const found = lookup.get(item.dataset.stockVariant);
+          const v = found?.variant;
+          const match = v && normalizedText(variantLabel(found.product, v)).includes(normalizedText(inventorySearch)) &&
+            (inventoryCondition === "all" || v.type === inventoryCondition) &&
+            (inventoryStatus === "all" || (inventoryStatus === "available" ? v.qty > 0 : inventoryStatus === "low" ? v.qty > 0 && v.qty <= LOW_STOCK_THRESHOLD : v.qty <= 0));
+          item.hidden = !match;
+          if (match) visible.push(v);
+        });
+        row.hidden = visible.length === 0;
+        const rowQty = visible.reduce((sum,v) => sum + v.qty, 0), rowValue = visible.reduce((sum,v) => sum + v.qty * v.cost, 0);
+        row.dataset.visibleQty = rowQty; row.dataset.visibleValue = rowValue;
+        row.children[4].textContent = rowQty;
+        row.children[5].textContent = fmtMoney(rowQty ? rowValue / rowQty : 0);
+        row.children[6].textContent = fmtMoney(rowValue);
+        if (!row.hidden) { count++; qty += rowQty; value += rowValue; }
       });
-      inventory.querySelectorAll("[data-stock-section]").forEach((section) => {
-        const visibleCount = section.querySelectorAll(
-          "tbody tr:not([hidden])",
-        ).length;
+      inventory.querySelectorAll("tbody").forEach(body => {
+        [...body.children].sort((a,b) => inventorySort === "qty" ? Number(a.dataset.visibleQty) - Number(b.dataset.visibleQty) : inventorySort === "value" ? Number(b.dataset.visibleValue) - Number(a.dataset.visibleValue) : a.children[1].textContent.localeCompare(b.children[1].textContent, "th")).forEach(row => body.append(row));
+      });
+      inventory.querySelectorAll("[data-stock-section]").forEach(section => {
+        const visibleCount = section.querySelectorAll("tbody tr:not([hidden])").length;
         section.hidden = visibleCount === 0;
-        section.querySelector(".stock-section-count").textContent =
-          `${visibleCount} กลุ่มสินค้า`;
+        section.querySelector(".stock-section-count").textContent = `${visibleCount} กลุ่มสินค้า`;
       });
-      toolbar.querySelector("#stock-filter-count").textContent =
-        `${count} กลุ่มสินค้า`;
+      toolbar.querySelector("#stock-filter-count").textContent = `${count} กลุ่มสินค้า`;
+      controls.querySelector("#stock-visible-totals").textContent = `เฉพาะที่แสดง: ${qty} ชิ้น · มูลค่า ${fmtMoney(value)}`;
       empty.hidden = count > 0;
     }
+    controls.querySelectorAll("select").forEach(select => { select.onchange = filter; });
+    controls.querySelector("#stock-clear").onclick = () => {
+      search.value = "";
+      controls.querySelector("#stock-status").value = "all";
+      controls.querySelector("#stock-condition").value = "all";
+      controls.querySelector("#stock-sort").value = "name";
+      filter();
+    };
+    controls.querySelector("#stock-export-filtered").onclick = () => {
+      const ids = new Set([...inventory.querySelectorAll('[data-stock-variant]:not([hidden])')].map(item => item.dataset.stockVariant));
+      downloadCsv("filtered-stock", [["รหัส", "สินค้า", "สี", "ไซส์", "อก (นิ้ว)", "ความยาว (นิ้ว)", "สภาพ", "จำนวน", "ต้นทุนต่อชิ้น", "ราคาขาย", "มูลค่า"], ...allVariants().filter(({variant}) => ids.has(variant.id)).map(({product, variant:v}) => [v.id, product.name, v.color, v.size, v.chestInches ?? "", v.lengthInches ?? "", v.type, v.qty, v.cost, v.price, money(v.qty * v.cost)])]);
+    };
     search.oninput = filter;
     filter();
   }
@@ -1729,6 +1869,7 @@ function setupStockWorkspace(content) {
     .querySelectorAll("button")
     .forEach((b) => (b.onclick = () => select(b.dataset.workspaceTab)));
   select(stockWorkspace);
+  wireStocktake();
 }
 function toast(message) {
   let el = document.getElementById("toast");
@@ -1787,7 +1928,7 @@ function renderHomeTab() {
   const q = stockSearch.trim().toLowerCase();
   const matchesQuery = (product, variant) =>
     (!q ||
-      [product.name, variant.color, variant.size]
+      [product.name, variant.color, variant.size, measurementLabel(variant)]
         .filter(Boolean)
         .join(" ")
         .toLowerCase()
@@ -1860,6 +2001,7 @@ function renderHomeTab() {
           const parts = [];
           if (v.size) parts.push("ไซส์ " + escapeHtml(v.size));
           parts.push(v.type === "used" ? "มือ2" : "มือ1");
+          if (measurementLabel(v)) parts.push(escapeHtml(measurementLabel(v)));
           return `
         <div class="variant-row ${v.qty <= 0 ? "out" : ""} ${isLow ? "low" : ""}">
           <div class="variant-info">${parts.join(" · ")}</div>
@@ -1896,7 +2038,7 @@ function renderHomeTab() {
               .map(
                 ({ variant: v }) => `
             <div class="variant-row out">
-              <div class="variant-info">${v.size ? "ไซส์ " + escapeHtml(v.size) : "-"}</div>
+              <div class="variant-info">${v.size ? "ไซส์ " + escapeHtml(v.size) : "-"} ${escapeHtml(measurementLabel(v))}</div>
               <span class="tag soldout">หมดแล้ว</span>
               <button class="btn btn-ghost btn-sm" data-stats="${v.id}">สถิติ</button>
             </div>
@@ -2009,7 +2151,9 @@ function openVariantDetail(variantId) {
       <div class="detail-stat"><div class="lbl">กำไรรวม (All time)</div><div class="val" style="color:${s.totalProfit < 0 ? "var(--red)" : "var(--green)"}">${fmtMoney(s.totalProfit)}</div></div>
     </div>
     ${renderMonthTable(s.months)}
+    ${renderProductAds(product.id)}
   `;
+  wireProductAds();
   document.getElementById("detail-overlay").classList.add("show");
 }
 
@@ -2031,7 +2175,9 @@ function openProductAggDetail(productId) {
       <div class="detail-stat"><div class="lbl">กำไรรวม (All time)</div><div class="val" style="color:${s.totalProfit < 0 ? "var(--red)" : "var(--green)"}">${fmtMoney(s.totalProfit)}</div></div>
     </div>
     ${renderMonthTable(s.months)}
+    ${renderProductAds(prod.id)}
   `;
+  wireProductAds();
   document.getElementById("detail-overlay").classList.add("show");
 }
 function closeDetail() {
@@ -2044,21 +2190,26 @@ function openEdit(variantId) {
   if (!found) return;
   editingVariantId = variantId;
   const { product, variant } = found;
+  editingVariantSnapshot = JSON.stringify({ name: product.name, variant });
   const f = document.getElementById("edit-form");
   f.name.value = product.name;
   f.color.value = variant.color || "";
   f.size.value = variant.size || "";
+  f.elements.namedItem("chestInches").value = variant.chestInches ?? "";
+  f.elements.namedItem("lengthInches").value = variant.lengthInches ?? "";
   f.querySelectorAll('input[name="type"]').forEach(
     (r) => (r.checked = r.value === variant.type),
   );
   f.cost.value = variant.cost;
   f.price.value = variant.price;
   f.qty.value = variant.qty;
+  f.elements.namedItem("reason").value = "แก้ไขจำนวนจากหน้าสินค้า";
   f.image.value = "";
   document.getElementById("edit-overlay").classList.add("show");
 }
 function closeEdit() {
   editingVariantId = null;
+  editingVariantSnapshot = null;
   document.getElementById("edit-overlay").classList.remove("show");
 }
 document.getElementById("edit-form").onsubmit = async (e) => {
@@ -2084,24 +2235,35 @@ document.getElementById("edit-form").onsubmit = async (e) => {
     name,
     color: (fd.get("color") || "").trim(),
     size: (fd.get("size") || "").trim(),
+    chestInches: parseMeasurement(fd.get("chestInches")),
+    lengthInches: parseMeasurement(fd.get("lengthInches")),
     type: fd.get("type"),
     cost: parseFloat(fd.get("cost")),
     price: parseFloat(fd.get("price")),
     qty: Number(fd.get("qty")),
+    reason: fd.get("reason"),
     image,
   });
   if (saved) closeEdit();
 };
 
 // ---------- Stock tab ----------
+function measurementInputs(prefix) {
+  return `<div class="measurement-fields"><label>อก (นิ้ว)<input type="number" class="${prefix}Chest" min="0.01" max="300" step="0.01" placeholder="ไม่ระบุ / เช่น 22.5"></label><label>ความยาว (นิ้ว)<input type="number" class="${prefix}Length" min="0.01" max="300" step="0.01" placeholder="ไม่ระบุ / เช่น 28"></label></div>`;
+}
+function readMeasurements(row, prefix) {
+  return { chestInches: parseMeasurement(row.querySelector(`.${prefix}Chest`).value), lengthInches: parseMeasurement(row.querySelector(`.${prefix}Length`).value) };
+}
 function restockRowTemplate(options) {
   return `
     <div class="restock-row">
-      <select class="restock-variant">${options}</select>
+      <div class="restock-choice"><select class="restock-variant" aria-label="ตัวเลือกสินค้าเดิม">${options}</select><select class="restock-product" aria-label="สินค้าที่เพิ่มสีหรือไซส์" hidden>${products.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join("")}</select></div>
       <input type="number" class="restock-qty" min="1" value="1" placeholder="จำนวน">
       <input type="number" class="restock-row-cost" min="0" step="0.01" placeholder="ต้นทุน/ชิ้น">
       <input type="number" class="restock-row-price" min="0" step="0.01" placeholder="ราคาขาย (โน้ต)">
       <button type="button" class="btn-danger remove-restock-row" style="display:none;">×</button>
+      <div class="restock-new-fields" hidden><input class="restock-color" placeholder="สีใหม่หรือสีเดิม" aria-label="สี"><input class="restock-size" placeholder="ไซส์ใหม่หรือไซส์เดิม" aria-label="ไซส์"><select class="restock-type" aria-label="สภาพสินค้า"><option value="new">มือหนึ่ง</option><option value="used">มือสอง</option></select>${measurementInputs("restock")}<span class="hint">สี/ไซส์/สภาพและขนาดจริงตรงกันจะเติมตัวเลือกเดิม หากอกหรือความยาวต่างกันจะแยกรายการ</span></div>
+      <div class="restock-tools"><button type="button" class="btn btn-ghost btn-sm add-restock-option">+ เพิ่มสี / ไซส์ของสินค้านี้</button><span class="restock-mode-label hint"></span></div>
     </div>
   `;
 }
@@ -2109,10 +2271,12 @@ function restockRowTemplate(options) {
 function pendingRowTemplate(idx) {
   return `
     <div class="pending-row">
+      <div class="pending-product-choice"><select class="pRowProduct" aria-label="เลือกสินค้าเดิมสำหรับสั่งซื้อ"><option value="">พิมพ์ชื่อสินค้า / สินค้าใหม่</option>${products.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join("")}</select><button type="button" class="btn btn-ghost btn-sm add-pending-option">+ เพิ่มสี / ไซส์ของสินค้านี้</button></div>
       <div class="pending-row-grid">
         <input type="text" class="pRowName" list="product-name-list" placeholder="ชื่อสินค้า">
         <input type="text" class="pRowColor" placeholder="สี">
         <input type="text" class="pRowSize" placeholder="ไซส์">
+        ${measurementInputs("pRow")}
         <div class="type-toggle pending-row-type">
           <label><input type="radio" name="pType_${idx}" value="new" checked><span>มือ1</span></label>
           <label><input type="radio" name="pType_${idx}" value="used"><span>มือ2</span></label>
@@ -2150,6 +2314,7 @@ function productBlockTemplate(idx) {
             <div class="pb-size-row">
               <input type="text" class="pbRowColor" placeholder="สี เช่น ดำ">
               <input type="text" class="pbRowSize" placeholder="ไซส์ เช่น S">
+              ${measurementInputs("pbRow")}
               <input type="number" class="pbRowQty" min="1" placeholder="จำนวน">
               <button type="button" class="btn-danger remove-pb-size-row" style="display:none;">×</button>
             </div>
@@ -2201,8 +2366,8 @@ function renderStockRows(groups) {
         .map(({ variant: v }) => {
           const isSoldOut = v.qty <= 0;
           return `
-      <div class="stock-size-item ${isSoldOut ? "soldout-item" : ""}">
-        <span>ไซส์ ${escapeHtml(v.size || "-")} · ${v.type === "new" ? "มือ1" : "มือ2"} · ${isSoldOut ? "สินค้าหมด" : v.qty + " ชิ้น"}</span>
+      <div class="stock-size-item ${isSoldOut ? "soldout-item" : ""}" data-stock-variant="${escapeHtml(v.id)}">
+        <span>ไซส์ ${escapeHtml(v.size || "-")} · ${v.type === "new" ? "มือ1" : "มือ2"} · ${isSoldOut ? "สินค้าหมด" : v.qty + " ชิ้น"}${measurementLabel(v) ? `<small class="measurement-note">${escapeHtml(measurementLabel(v))}</small>` : ""}</span>
         <span>${fmtMoney(v.cost)}</span>
         <button class="btn btn-ghost btn-sm" data-edit="${v.id}">แก้ไข</button>
         <button class="btn-danger" data-del="${v.id}">ลบ</button>
@@ -2214,7 +2379,7 @@ function renderStockRows(groups) {
       <td><div class="thumb-cell">
         <div class="thumb">${group.image ? `<img src="${escapeHtml(group.image)}" alt="">` : '<span class="thumb-ph">👕</span>'}</div>
       </div></td>
-      <td>${escapeHtml(group.name)}</td>
+      <td>${escapeHtml(group.name)}<div class="stock-ad-actions">${[...new Map(group.variants.map(({product}) => [product.id, product])).values()].map(product => `<button class="btn btn-ghost btn-sm" data-product-ads="${escapeHtml(product.id)}">ยิงแอด (${adCampaigns.filter(c => campaignHasProduct(c, product.id)).length})</button>`).join("")}</div></td>
       <td>${escapeHtml(group.color)}</td>
       <td class="stock-size-list">${sizeRows}</td>
       <td class="num">${totalQty}</td>
@@ -2266,7 +2431,7 @@ function renderStockTab() {
       <form id="add-product-form" novalidate>
         <div class="type-toggle" id="mode-toggle" style="max-width:520px; margin-bottom:16px;">
           <label><input type="radio" name="mode" value="new" checked><span>เพิ่มสินค้า/ตัวเลือกใหม่</span></label>
-          <label><input type="radio" name="mode" value="restock" ${allVariants().length === 0 ? "disabled" : ""}><span>เติมสต็อกตัวที่มีอยู่</span></label>
+          <label><input type="radio" name="mode" value="restock" ${allVariants().length === 0 ? "disabled" : ""}><span>เติมสต็อก / เพิ่มสีไซส์</span></label>
           <label><input type="radio" name="mode" value="pending"><span>สั่งซื้อ (จ่ายแล้ว รอของมาส่ง)</span></label>
         </div>
 
@@ -2299,7 +2464,7 @@ function renderStockTab() {
             <input type="checkbox" name="logExpense" id="logExpense" checked>
             <label for="logExpense">บันทึกต้นทุนที่ซื้อเข้าเป็นรายจ่ายทันที</label>
           </div>
-          <p class="hint" style="grid-column:1/-1; margin:2px 0 0;">แต่ละสินค้าตั้งชื่อของตัวเอง แล้วเพิ่มสี/ไซส์ได้หลายแถวโดยไม่ต้องพิมพ์ชื่อซ้ำ — เลือกได้ว่าจะคิดต้นทุนแยกทีละสินค้า (ต่อชิ้น หรือเหมาทั้งล็อตของสินค้านั้น) หรือจะเหมารวมทุกสินค้าทุกไซส์ในครั้งนี้เป็นยอดเดียวแล้วให้ระบบหารเฉลี่ยต้นทุนต่อชิ้นให้เอง</p>
+          <p class="hint" style="grid-column:1/-1; margin:2px 0 0;">แต่ละสินค้าตั้งชื่อของตัวเอง แล้วเพิ่มสี/ไซส์ได้หลายแถว สินค้ามือสองที่ขนาดต่างกันให้แยกแถวและกรอกอก/ความยาวหน่วยนิ้ว เช่น ไซส์ M อก 22 ยาว 28 กับไซส์ M อก 23 ยาว 29 — เลือกได้ว่าจะคิดต้นทุนแยกทีละสินค้า (ต่อชิ้น หรือเหมาทั้งล็อตของสินค้านั้น) หรือจะเหมารวมทุกสินค้าทุกไซส์ในครั้งนี้เป็นยอดเดียวแล้วให้ระบบหารเฉลี่ยต้นทุนต่อชิ้นให้เอง</p>
         </div>
 
         <div id="restock-fields" class="form-grid" style="display:none;">
@@ -2307,7 +2472,8 @@ function renderStockTab() {
             <label>รายการที่เติมสต๊อก (เลือกได้หลายสินค้า)</label>
             <div class="restock-row restock-heading" aria-hidden="true"><span>สินค้า</span><span>จำนวน</span><span>ต้นทุน/ชิ้น</span><span>ราคาขาย (โน้ต)</span></div>
             <div id="restock-rows">${restockRowTemplate(variantOptions)}</div>
-            <button type="button" class="btn btn-ghost btn-sm" id="add-restock-row" style="margin-top:4px;">+ เพิ่มสินค้าอีกตัว</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="add-restock-row" style="margin-top:4px;">+ เพิ่มรายการเติมสต็อก</button>
+            <p class="hint">เลือกตัวเลือกเดิมเพื่อเติมจำนวน หรือกด “เพิ่มสี / ไซส์ของสินค้านี้” เพื่อเพิ่มตัวเลือกใหม่โดยไม่ต้องสร้างสินค้าใหม่</p>
           </div>
           <div class="field">
             <label>วิธีคิดต้นทุน</label>
@@ -2361,7 +2527,7 @@ function renderStockTab() {
 
     <div class="panel">
       <h2>สินค้าที่สั่งซื้อแล้ว รอรับของ${pendingOrders.length > 0 ? " (" + pendingOrders.length + ")" : ""}</h2>
-      <p class="hint">รายการนี้จ่ายเงินไปแล้ว (นับเป็นรายจ่ายแล้ว) แต่ยังไม่นับเป็นสต็อกที่ขายได้ จนกว่าจะกดยืนยันว่าได้รับของจริง — ติ๊กเลือกรายการที่ของมาถึงพร้อมกัน แล้วใส่ค่าส่งรวมครั้งเดียวได้</p>
+      <p class="hint">รายการนี้จ่ายเงินไปแล้ว (นับเป็นรายจ่ายแล้ว) แต่ยังไม่นับเป็นสต็อกที่ขายได้ จนกว่าจะกดยืนยันว่าได้รับของจริง — ติ๊กเลือกรายการที่ของมาถึงพร้อมกัน ระบุจำนวนที่ได้รับครั้งนี้ได้แม้มาไม่ครบ แล้วใส่ค่าส่งรวมครั้งเดียวได้</p>
       ${
         pendingOrders.length === 0
           ? `<div class="empty"><div class="big">ไม่มีรายการรอรับของ</div></div>`
@@ -2375,8 +2541,9 @@ function renderStockTab() {
             <div class="thumb" style="width:36px;height:36px;">${po.image ? `<img src="${escapeHtml(po.image)}" alt="">` : '<span class="thumb-ph">📦</span>'}</div>
             <div class="variant-info">
               ${escapeHtml(pendingLabel(po))} x${po.qty}<br>
-              <span class="hint" style="margin:0;">สั่งเมื่อ ${po.orderDate} · จ่ายไปแล้ว ${fmtMoney(po.cost * po.qty)}${po.note ? " · " + escapeHtml(po.note) : ""}</span>
+              <span class="hint" style="margin:0;">สั่งเมื่อ ${po.orderDate} · ต้นทุนส่วนที่รอรับ ${fmtMoney(po.cost * po.qty)}${po.receivedQty ? " · รับแล้ว " + po.receivedQty + "/" + po.originalQty + " ชิ้น" : ""}${po.note ? " · " + escapeHtml(po.note) : ""}</span>
             </div>
+            <div class="field pending-receive-field"><label>รับครั้งนี้ (ชิ้น)</label><input class="pending-receive-qty" data-pending-id="${escapeHtml(po.id)}" type="number" min="1" max="${po.qty}" step="1" value="${po.qty}" aria-label="จำนวนรับ ${escapeHtml(po.name)}"></div>
             <button class="btn-danger" data-cancel-pending="${po.id}">ยกเลิก</button>
           </div>
         `,
@@ -2416,7 +2583,7 @@ function renderStockTab() {
             const sizeOptions = sortedVariants
               .map(
                 ({ variant: v }) =>
-                  `<option value="${v.id}">ไซส์ ${escapeHtml(v.size || "-")} · ${v.type === "used" ? "มือ2" : "มือ1"} · เหลือ ${v.qty}</option>`,
+                  `<option value="${v.id}">ไซส์ ${escapeHtml(v.size || "-")} · ${v.type === "used" ? "มือ2" : "มือ1"} ${measurementLabel(v) ? ` · ${escapeHtml(measurementLabel(v))}` : ""} · เหลือ ${v.qty}</option>`,
               )
               .join("");
             const first = sortedVariants[0].variant;
@@ -2517,9 +2684,29 @@ function wireStockTab() {
         row.remove();
         wireRestockRows();
       };
-      row.querySelector(".restock-variant").onchange = () =>
-        syncRestockRow(row);
-      syncRestockRow(row);
+      row.querySelector(".restock-variant").onchange = () => syncRestockRow(row);
+      row.querySelector(".add-restock-option").onclick = () => {
+        const found = findVariant(row.querySelector(".restock-variant").value);
+        const wrapper = document.createElement("div");
+        wrapper.innerHTML = restockRowTemplate(restockOptions);
+        const next = wrapper.firstElementChild;
+        next.dataset.newOption = "true";
+        next.dataset.initialized = "true";
+        next.querySelector(".restock-variant").hidden = true;
+        next.querySelector(".restock-product").hidden = false;
+        next.querySelector(".restock-product").value = row.dataset.newOption ? row.querySelector(".restock-product").value : found?.product.id || "";
+        next.querySelector(".restock-new-fields").hidden = false;
+        next.querySelector(".restock-mode-label").textContent = "เพิ่มสี / ไซส์ให้สินค้าเดิม";
+        next.querySelector(".restock-color").value = row.dataset.newOption ? row.querySelector(".restock-color").value : found?.variant.color || "";
+        next.querySelector(".restock-type").value = row.dataset.newOption ? row.querySelector(".restock-type").value : found?.variant.type || "new";
+        next.querySelector(".restock-row-cost").value = row.querySelector(".restock-row-cost").value;
+        next.querySelector(".restock-row-price").value = row.querySelector(".restock-row-price").value;
+        row.after(next);
+        wireRestockRows();
+        enhanceUI();
+        next.querySelector(".restock-size").focus();
+      };
+      if (!row.dataset.initialized) { syncRestockRow(row); row.dataset.initialized = "true"; }
     });
   }
   const addRestockRowBtn = document.getElementById("add-restock-row");
@@ -2625,6 +2812,7 @@ function wireStockTab() {
         row.innerHTML = `
           <input type="text" class="pbRowColor" placeholder="สี เช่น ขาว">
           <input type="text" class="pbRowSize" placeholder="ไซส์ เช่น M">
+          ${measurementInputs("pbRow")}
           <input type="number" class="pbRowQty" min="1" placeholder="จำนวน">
           <button type="button" class="btn-danger remove-pb-size-row">×</button>
         `;
@@ -2669,6 +2857,28 @@ function wireStockTab() {
   function wirePendingRemoveButtons() {
     const rowsDiv = document.getElementById("pending-rows");
     if (!rowsDiv) return;
+    rowsDiv.querySelectorAll(".pending-row").forEach(row => {
+      const select = row.querySelector(".pRowProduct"), name = row.querySelector(".pRowName");
+      select.onchange = () => {
+        const product = products.find(p => p.id === select.value);
+        if (product) name.value = product.name;
+        name.readOnly = Boolean(product);
+      };
+      row.querySelector(".add-pending-option").onclick = () => {
+        if (!name.value.trim()) { showAlert("เลือกสินค้าเดิมหรือกรอกชื่อสินค้าก่อนเพิ่มสี/ไซส์"); return; }
+        const wrapper = document.createElement("div");
+        wrapper.innerHTML = pendingRowTemplate(pendingRowSeq++);
+        const next = wrapper.firstElementChild;
+        [".pRowProduct", ".pRowName", ".pRowColor", ".pRowCost", ".pRowPrice"].forEach(selector => { next.querySelector(selector).value = row.querySelector(selector).value; });
+        next.querySelector(".pRowName").readOnly = name.readOnly;
+        const type = row.querySelector('.pending-row-type input:checked').value;
+        next.querySelector(`.pending-row-type input[value="${type}"]`).checked = true;
+        row.after(next);
+        wireToggleLabels(next.querySelector(".pending-row-type"));
+        wirePendingRemoveButtons(); enhanceUI();
+        next.querySelector(".pRowSize").focus();
+      };
+    });
     const buttons = rowsDiv.querySelectorAll(".remove-pending-row");
     buttons.forEach((btn) => {
       btn.style.display = buttons.length > 1 ? "inline-flex" : "none";
@@ -2748,22 +2958,24 @@ function wireStockTab() {
           document
             .querySelectorAll("#restock-rows .restock-row")
             .forEach((row, i) => {
-              const variantId = row.querySelector(".restock-variant").value;
-              const qty = parseInt(row.querySelector(".restock-qty").value, 10);
+              const newOption = row.dataset.newOption === "true";
+              const variantId = newOption ? "" : row.querySelector(".restock-variant").value;
+              const productId = newOption ? row.querySelector(".restock-product").value : "";
+              const qty = Number(row.querySelector(".restock-qty").value);
               const costValue = row.querySelector(".restock-row-cost").value;
               const priceValue = row.querySelector(".restock-row-price").value;
-              if (!variantId || !qty || qty < 1) {
+              if ((!newOption && !variantId) || (newOption && !productId) || !Number.isSafeInteger(qty) || qty < 1) {
                 rowError = "ระบุสินค้าและจำนวนให้ถูกต้องในแถวที่ " + (i + 1);
                 return;
               }
-              if (selected.has(variantId)) {
+              if (!newOption && selected.has(variantId)) {
                 rowError =
                   "เลือกสินค้าซ้ำในแถวที่ " +
                   (i + 1) +
                   " กรุณารวมจำนวนไว้ในแถวเดียว";
                 return;
               }
-              selected.add(variantId);
+              if (!newOption) selected.add(variantId);
               const cost = parseFloat(costValue);
               if (costMode === "perunit" && (isNaN(cost) || cost < 0)) {
                 rowError = "กรุณาระบุต้นทุนต่อชิ้นในแถวที่ " + (i + 1);
@@ -2771,6 +2983,11 @@ function wireStockTab() {
               }
               const price = parseFloat(priceValue);
               rows.push({
+                newOption, productId,
+                ...(newOption ? readMeasurements(row, "restock") : {}),
+                color: newOption ? row.querySelector(".restock-color").value.trim() : "",
+                size: newOption ? row.querySelector(".restock-size").value.trim() : "",
+                type: newOption ? row.querySelector(".restock-type").value : "new",
                 variantId,
                 qty,
                 cost,
@@ -2808,11 +3025,15 @@ function wireStockTab() {
           const rows = [];
           let rowError = null;
           rowEls.forEach((rowEl, i) => {
-            const name = rowEl.querySelector(".pRowName").value.trim();
+            const productId = rowEl.querySelector(".pRowProduct").value;
+            const selectedProduct = products.find(p => p.id === productId);
+            if (productId && !selectedProduct) { rowError = "สินค้าเดิมถูกลบ กรุณาเลือกสินค้าอีกครั้ง"; return; }
+            const name = selectedProduct?.name || rowEl.querySelector(".pRowName").value.trim();
             const qtyStr = rowEl.querySelector(".pRowQty").value;
             const costStr = rowEl.querySelector(".pRowCost").value;
-            if (!name && !qtyStr && !costStr) return; // skip fully-empty rows
-            const qty = parseInt(qtyStr, 10);
+            const measurements = readMeasurements(rowEl, "pRow");
+            if (!name && !qtyStr && !costStr && measurements.chestInches == null && measurements.lengthInches == null) return; // skip fully-empty rows
+            const qty = Number(qtyStr);
             const priceVal = parseFloat(
               rowEl.querySelector(".pRowPrice").value,
             );
@@ -2823,7 +3044,7 @@ function wireStockTab() {
               rowError = "กรุณาระบุชื่อสินค้าในแถวที่ " + (i + 1);
               return;
             }
-            if (!qty || qty < 1) {
+            if (!Number.isSafeInteger(qty) || qty < 1) {
               rowError = "ระบุจำนวนให้ถูกต้องในแถวที่ " + (i + 1);
               return;
             }
@@ -2837,8 +3058,10 @@ function wireStockTab() {
             }
             rows.push({
               name,
+              ...(productId ? { productId } : {}),
               color: rowEl.querySelector(".pRowColor").value.trim(),
               size: rowEl.querySelector(".pRowSize").value.trim(),
+              ...readMeasurements(rowEl, "pRow"),
               type: typeInput ? typeInput.value : "new",
               qty,
               cost,
@@ -2882,10 +3105,11 @@ function wireStockTab() {
               const color = rowEl.querySelector(".pbRowColor").value.trim();
               const size = rowEl.querySelector(".pbRowSize").value.trim();
               const qty =
-                parseInt(rowEl.querySelector(".pbRowQty").value, 10) || 0;
-              if (!color && !size && !qty) return; // แถวว่างทั้งหมด ข้ามไป
-              if (qty <= 0) return;
-              blockRows.push({ color, size, qty });
+                Number(rowEl.querySelector(".pbRowQty").value);
+              const measurements = readMeasurements(rowEl, "pbRow");
+              if (!color && !size && !qty && measurements.chestInches == null && measurements.lengthInches == null) return; // แถวว่างทั้งหมด ข้ามไป
+              if (!Number.isSafeInteger(qty) || qty < 1) { err = `ระบุจำนวนเต็มมากกว่า 0 ในกลุ่มที่ ${bi + 1}`; return; }
+              blockRows.push({ color, size, qty, ...measurements });
             });
             if (blockRows.length === 0) return; // สินค้าตัวนี้ยังไม่ได้กรอกอะไร ข้ามไปเลย
 
@@ -2988,6 +3212,7 @@ function wireStockTab() {
                 name: b.name,
                 color: r.color,
                 size: r.size,
+                ...measurementsOf(r),
                 qty: r.qty,
                 type: b.type,
                 price: b.price,
@@ -3007,7 +3232,7 @@ function wireStockTab() {
         console.error("add-product-form submit failed", err);
         const message =
           err && err.message ? err.message : "ไม่สามารถบันทึกข้อมูลได้";
-        showAlert("บันทึกสินค้าไม่สำเร็จ: " + message);
+        if (!err.storageReported) showAlert("บันทึกสินค้าไม่สำเร็จ: " + message);
       } finally {
         submitBtn.dataset.saving = "false";
         submitBtn.disabled = false;
@@ -3064,7 +3289,7 @@ function wireStockTab() {
         return;
       }
       const shipAmt = document.getElementById("pending-bulk-ship").value;
-      await receivePendingOrdersBulk(ids, shipAmt);
+      await receivePendingOrdersBulk(ids, shipAmt, Object.fromEntries([...document.querySelectorAll(".pending-receive-qty")].map(input => [input.dataset.pendingId, input.value])));
     };
   }
   document.querySelectorAll("[data-cancel-pending]").forEach((btn) => {
@@ -3097,7 +3322,8 @@ function wireStockTab() {
     attachSubmit.onclick = () => {
       const items = [];
       document.querySelectorAll(".attach-qty").forEach((inp) => {
-        const qty = parseInt(inp.value, 10) || 0;
+        const qty = Number(inp.value || 0);
+        if (!Number.isSafeInteger(qty) || qty < 0) { items.push({ qty: NaN }); return; }
         if (qty > 0) {
           const found = findVariant(inp.dataset.variant);
           if (found)
@@ -3146,7 +3372,7 @@ function renderSellTab() {
       const sizeOptions = group.variants
         .map(
           ({ variant }) =>
-            `<option value="${variant.id}" data-color="${escapeHtml(variant.color || "-")}">ไซส์ ${escapeHtml(variant.size || "-")} · ${variant.type === "used" ? "มือ2" : "มือ1"} · เหลือ ${variant.qty}</option>`,
+            `<option value="${variant.id}" data-color="${escapeHtml(variant.color || "-")}">ไซส์ ${escapeHtml(variant.size || "-")} · ${variant.type === "used" ? "มือ2" : "มือ1"} ${measurementLabel(variant) ? ` · ${escapeHtml(measurementLabel(variant))}` : ""} · เหลือ ${variant.qty}</option>`,
         )
         .join("");
       return `
@@ -3163,6 +3389,8 @@ function renderSellTab() {
           <div class="field"><label>ค่าส่ง (รวม)</label><input class="sell-shipping" type="number" min="0" step="0.01" value="0"></div>
           <div class="field"><label>ค่ากลาง (รวม)</label><input class="sell-commission" type="number" min="0" step="0.01" value="0"></div>
         </div>
+        <div class="field"><label>ยอดขายมาจากแคมเปญ (ถ้ามี)</label><select class="sell-ad-campaign"><option value="">ไม่ระบุแคมเปญ</option></select></div>
+        <p class="hint sell-ad-preview"></p>
         <div class="sale-total" aria-live="polite"><span>ยอดขายรวม / กำไรประมาณ</span><b class="sale-total-value"></b></div>
         <button class="btn btn-gold btn-sm sell-submit" style="width:100%; margin-top:10px;" data-sell="${first.id}">${icon("bag")}บันทึกการขาย</button>
         <div class="checkline" style="margin-top:10px;"><input type="checkbox" class="sell-installment"><label>ลูกค้าผ่อนชำระ (ไม่ได้เงินก้อนเดียว)</label></div>
@@ -3234,6 +3462,8 @@ function wireSellTab() {
         (Number(card.querySelector(".sell-commission").value) || 0);
     card.querySelector(".sale-total-value").textContent =
       `${fmtMoney(total)} / ${fmtMoney(profit)}`;
+    const campaign = adCampaigns.find(c => c.id === card.querySelector(".sell-ad-campaign").value);
+    card.querySelector(".sell-ad-preview").textContent = campaign ? `งบแอดตามเป้า ${fmtMoney(campaign.budget / campaign.targetQty)}/ชิ้น · กำไรคาดการณ์หลังเผื่องบแอด ${fmtMoney(profit - qty * campaign.budget / campaign.targetQty)} · กำไรจริงและเงินแนะนำเก็บดูในเมนูยิงแอดหลังบันทึกค่าแอด` : "กำไรประมาณด้านล่างยังไม่หักค่าแอด เลือกแคมเปญเพื่อผูกยอดขาย";
   }
   function syncSaleCard(card) {
     const color = card.querySelector(".sell-color-select").value;
@@ -3254,6 +3484,9 @@ function wireSellTab() {
       variant.type === "used" ? "มือ2" : "มือ1";
     card.querySelector(".sell-price").innerHTML =
       `${fmtMoney(variant.price)} <span class="sell-cost-note">ต้นทุน ${fmtMoney(variant.cost)}</span>`;
+    const adSelect = card.querySelector(".sell-ad-campaign"), previousCampaign = adSelect.value;
+    adSelect.innerHTML = '<option value="">ไม่ระบุแคมเปญ</option>' + adCampaigns.filter(c => campaignHasProduct(c, found.product.id) && c.status !== "cancelled").map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)} · ${c.startDate}–${campaignUntilBudget(c) ? 'จนงบหมด' : c.endDate}</option>`).join("");
+    if ([...adSelect.options].some(o => o.value === previousCampaign)) adSelect.value = previousCampaign;
     const qty = card.querySelector(".sell-qty");
     qty.max = variant.qty;
     if (Number(qty.value) > variant.qty) qty.value = 1;
@@ -3267,6 +3500,7 @@ function wireSellTab() {
     updateSaleTotal(card);
   }
   document.querySelectorAll("[data-sale-card]").forEach((card) => {
+    card.querySelector(".sell-ad-campaign").onchange = () => updateSaleTotal(card);
     card.querySelector(".sell-color-select").onchange = () =>
       syncSaleCard(card);
     card.querySelector(".sell-size-select").onchange = () => syncSaleCard(card);
@@ -3296,6 +3530,7 @@ function wireSellTab() {
         dueDays: card.querySelector(".sell-due-days").value,
         deposit: card.querySelector(".sell-deposit").value,
         customerNote: card.querySelector(".sell-customer").value,
+        adCampaignId: card.querySelector(".sell-ad-campaign").value,
       });
     };
   });
@@ -3381,7 +3616,7 @@ function renderTxTab() {
       <td>${escapeHtml(t.category || "")}</td>
       <td>${escapeHtml(t.desc || "")}</td>
       <td class="num" style="color:${t.type === "income" ? "var(--green)" : ["installment", "preorder"].includes(t.type) ? "var(--navy-3)" : "var(--red)"}">${t.type === "income" ? "+" : ["installment", "preorder"].includes(t.type) ? "" : "−"}${fmtMoney(t.amount)}</td>
-      <td><button class="${t.preorderId ? "btn btn-ghost btn-sm" : "btn-danger"}" data-txdel="${escapeHtml(t.id)}" ${t.preorderId ? 'title="จัดการจากหน้า Pre-order ลูกค้า"' : ""}>${t.preorderId ? "ดู pre-order" : "ลบ"}</button></td>
+      <td>${isManualTransaction(t) ? `<button class="btn btn-ghost btn-sm" data-txedit="${escapeHtml(t.id)}">แก้ไข</button>` : ""}<button class="${t.preorderId ? "btn btn-ghost btn-sm" : "btn-danger"}" data-txdel="${escapeHtml(t.id)}" ${t.preorderId ? 'title="จัดการจากหน้า Pre-order ลูกค้า"' : ""}>${t.preorderId ? "ดู pre-order" : "ลบ"}</button></td>
     </tr>
   `,
     )
@@ -3389,7 +3624,7 @@ function renderTxTab() {
 
   return `
     <div class="panel">
-      <h2>บันทึกรายการรายรับ-รายจ่ายเพิ่มเติม</h2>
+      <h2>${editingTransaction ? "แก้ไขรายการบัญชี" : "บันทึกรายการรายรับ-รายจ่ายเพิ่มเติม"}</h2>
       <p class="hint">สำหรับค่าใช้จ่ายอื่นๆ ที่ไม่ใช่ต้นทุนสินค้า เช่น ค่าเช่า ค่าขนส่ง หรือรายรับอื่น</p>
       <form id="add-tx-form">
         <div class="form-grid">
@@ -3417,12 +3652,12 @@ function renderTxTab() {
             <input type="date" name="date" value="${todayStr()}">
           </div>
         </div>
-        <div style="margin-top:12px;"><button type="submit" class="btn btn-primary">บันทึกรายการ</button></div>
+        <div style="margin-top:12px;"><button type="submit" class="btn btn-primary">${editingTransaction ? "บันทึกการแก้ไข" : "บันทึกรายการ"}</button>${editingTransaction ? '<button type="button" class="btn btn-ghost" id="tx-cancel-edit">ยกเลิกการแก้ไข</button>' : ""}</div>
       </form>
     </div>
 
     <div class="panel">
-      <h2>ประวัติรายการทั้งหมด</h2>
+      <h2>ประวัติรายการทั้งหมด</h2><button class="btn btn-ghost btn-sm" data-export="filtered-transactions">ส่งออกรายการที่กรอง CSV</button>
       <div class="transaction-filters"><div class="field search-field">${icon("search")}<input id="tx-search" type="search" aria-label="ค้นหารายการบัญชี" placeholder="ค้นหารายการ หมวดหมู่ หรือรายละเอียด" value="${escapeHtml(txSearch)}"></div><div class="field"><select id="tx-type-filter" aria-label="กรองประเภทรายการ">${[
         ["all", "ทุกประเภท"],
         ["income", "รายรับ"],
@@ -3498,6 +3733,18 @@ function wireTxTab() {
     filterTransactions();
   }
   const f = document.getElementById("add-tx-form");
+  if (f && editingTransaction) {
+    ["type", "category", "desc", "amount", "date"].forEach(key => { f.elements.namedItem(key).value = editingTransaction[key] ?? ""; });
+    document.getElementById("tx-cancel-edit").onclick = () => { editingTransaction = null; render(); };
+  }
+  document.querySelectorAll("[data-txedit]").forEach(button => {
+    button.onclick = () => {
+      const tx = transactions.find(item => item.id === button.dataset.txedit);
+      if (!tx || !isManualTransaction(tx)) return;
+      editingTransaction = copyData(tx); render();
+      document.querySelector('#add-tx-form [name="amount"]').focus();
+    };
+  });
   if (f)
     f.onsubmit = (e) => {
       e.preventDefault();
@@ -3534,7 +3781,7 @@ function renderReportTab() {
   );
 
   if (keys.length === 0) {
-    return `<div class="panel"><h2>รายงานกำไรรายเดือน</h2>
+    return `<div class="panel"><h2>รายรับ–รายจ่ายรายเดือน</h2>
       <div class="empty"><div class="big">ยังไม่มีข้อมูลสำหรับสรุปรายเดือน</div>เมื่อมีการขายสินค้าหรือบันทึกรายรับ-รายจ่าย รายงานจะแสดงที่นี่</div>
     </div>`;
   }
@@ -3569,6 +3816,7 @@ function renderReportTab() {
     <tr>
       <td class="num" style="font-family:'IBM Plex Mono',monospace;">${t.date}</td>
       <td>${escapeHtml(t.desc || "")}</td>
+      <td class="num">${t.qty || 0}</td>
       <td class="num">${fmtMoney(t.unitPrice)}</td>
       <td class="num">${fmtMoney(t.unitCost)}</td>
       <td class="num">${fmtMoney(t.shipping || 0)}</td>
@@ -3584,10 +3832,10 @@ function renderReportTab() {
       ? ""
       : `
     <div class="panel">
-      <h2>กำไรรายชิ้น (ตามการขายแต่ละครั้ง)</h2>
-      <p class="hint">กำไรสุทธิ = (ราคาขายจริง − ต้นทุน) × จำนวน − ค่าส่ง − ค่ากลาง</p>
+      <h2>กำไรตามรายการขาย</h2>
+      <p class="hint">กำไรจากการขาย = (ราคาขายจริง − ต้นทุน) × จำนวน − ค่าส่ง − ค่ากลาง ยังไม่หักค่าใช้จ่ายทั่วไป</p>
       <table>
-        <thead><tr><th>วันที่</th><th>รายการ</th><th class="num">ราคาขาย/ชิ้น</th><th class="num">ต้นทุน/ชิ้น</th><th class="num">ค่าส่ง</th><th class="num">ค่ากลาง</th><th class="num">กำไรสุทธิ</th></tr></thead>
+        <thead><tr><th>วันที่</th><th>รายการ</th><th class="num">จำนวน</th><th class="num">ราคาขาย/ชิ้น</th><th class="num">ต้นทุน/ชิ้น</th><th class="num">ค่าส่ง</th><th class="num">ค่ากลาง</th><th class="num">กำไรจากการขาย</th></tr></thead>
         <tbody>${saleRows}</tbody>
       </table>
     </div>
@@ -3630,12 +3878,13 @@ function renderReportTab() {
     </div>
   `;
 
-  return `<div class="panel"><h2>รายงานกำไรรายเดือน</h2><p class="hint">กำไร = รายรับทั้งหมด − รายจ่ายทั้งหมด ของแต่ละเดือน (รวมต้นทุนสินค้าที่ซื้อเข้า)</p>${rows}</div>${chartSection}${topSection}${saleSection}`;
+  return `<div class="panel"><h2>รายรับ–รายจ่ายรายเดือน</h2><p class="hint">เงินสดสุทธิ = เงินรับจริง − เงินจ่ายจริง ของแต่ละเดือน รวมต้นทุนสินค้าที่ซื้อเข้า</p>${rows}</div>${chartSection}${topSection}${saleSection}`;
 }
 
 let trendChartInstance = null;
 let sellersChartInstance = null;
 function wireReportTab() {
+  wireRangeReport();
   if (typeof Chart === "undefined") return;
   const trendCanvas = document.getElementById("trend-chart");
   if (trendCanvas) {
@@ -3667,7 +3916,7 @@ function wireReportTab() {
             fill: true,
           },
           {
-            label: "กำไร",
+            label: "กระแสเงินสดสุทธิ",
             data: profitData,
             borderColor: "#16214a",
             backgroundColor: "rgba(22,33,74,0.06)",
@@ -3717,6 +3966,7 @@ function wireReportTab() {
       },
     });
   }
+  updateReportChartTheme();
 }
 
 // Wires clicks on .type-toggle labels directly to their radio input, instead of
@@ -4048,3 +4298,200 @@ function wirePreordersTab() {
     };
   });
 }
+
+// ---------- Follow-ups and portable reports ----------
+let taskSearch = "";
+let taskFilter = "all";
+let reportFrom = "";
+let reportTo = "";
+const taskKinds = { ads: "แคมเปญยิงแอด", stock: "สต็อกใกล้หมด", supplier: "ร้านสั่งรอรับ", preorder: "Pre-order ลูกค้า", installment: "ผ่อนค้างชำระ" };
+function renderTasksTab() {
+  const items = followUpItems(storeValues(), todayStr(), LOW_STOCK_THRESHOLD);
+  return `<section class="stats tasks-stats">${metric("งานทั้งหมด", items.length, "อัปเดตจากรายการปัจจุบัน", "check")}${metric("ควรจัดการก่อน", items.filter(item => item.priority === 0).length, "สินค้าหมด เกินวันนัด หรือแอดเกินงบ", "clock", "expense-stat")}</section>
+    <div class="panel"><h2>งานที่ต้องติดตาม</h2><p class="hint">สินค้ารอรับคือร้านสั่งมาขายเอง ส่วน pre-order คือรายการที่ลูกค้าสั่งกับร้าน วันที่ในรายการรอรับเป็นวันสั่งซื้อ ส่วนรายการลูกค้าเป็นวันครบกำหนด</p>
+    <div class="task-filters"><div class="field"><label>ค้นหางาน</label><input id="task-search" type="search" value="${escapeHtml(taskSearch)}" placeholder="สินค้า ลูกค้า หรือหมายเหตุ"></div><div class="field"><label>ประเภทงาน</label><select id="task-filter">${Object.entries({ all: "ทุกประเภท", urgent: "ควรจัดการก่อน", ...taskKinds }).map(([key, label]) => `<option value="${key}" ${taskFilter === key ? "selected" : ""}>${label}</option>`).join("")}</select></div></div><p class="hint" id="task-count" role="status"></p>
+    <div class="task-list">${items.map(item => `<article class="task-card" data-task-kind="${item.kind}" data-task-priority="${item.priority}"><div><span class="tag ${item.priority === 0 ? "expense" : "preorder"}">${taskKinds[item.kind]}</span><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.detail)}</p>${item.date ? `<p class="hint">${item.kind === "supplier" ? "สั่งเมื่อ" : "ครบกำหนด"} ${escapeHtml(item.date)}</p>` : ""}</div><button class="btn btn-ghost" data-task-target="${item.target}" data-task-id="${escapeHtml(item.id)}" data-task-workspace="${item.workspace || ""}">เปิดรายการ</button></article>`).join("")}</div><div class="empty" id="task-empty" hidden>ไม่มีงานที่ตรงกับตัวกรอง</div></div>`;
+}
+function wireTasksTab() {
+  const search = document.getElementById("task-search"), filter = document.getElementById("task-filter");
+  if (!search) return;
+  const apply = () => {
+    taskSearch = search.value; taskFilter = filter.value;
+    let count = 0;
+    document.querySelectorAll("[data-task-kind]").forEach(card => {
+      const match = normalizedText(card.textContent).includes(normalizedText(taskSearch)) && (taskFilter === "all" || (taskFilter === "urgent" ? card.dataset.taskPriority === "0" : card.dataset.taskKind === taskFilter));
+      card.hidden = !match; if (match) count++;
+    });
+    document.getElementById("task-count").textContent = `แสดง ${count} งาน`;
+    document.getElementById("task-empty").hidden = count > 0;
+  };
+  search.oninput = filter.onchange = apply;
+  apply();
+  document.querySelectorAll("[data-task-target]").forEach(button => {
+    button.onclick = () => {
+      const { taskTarget: target, taskId: id, taskWorkspace: workspace } = button.dataset;
+      if (target === "preorder") { preorderSearch = id; preorderFilter = "open"; }
+      if (workspace === "inventory") inventorySearch = findVariant(id)?.product.name || "";
+      navigateTo(target, workspace);
+      if (target === "ads") {
+        document.getElementById('ad-search').value = '';
+        document.getElementById('ad-filter').value = 'all';
+        document.getElementById('ad-filter').dispatchEvent(new Event('change'));
+        const campaignCard = [...document.querySelectorAll('[data-ad-id]')].find(card => card.dataset.adId === id);
+        if (campaignCard) { campaignCard.scrollIntoView({block:'start'}); campaignCard.querySelector('button')?.focus({preventScroll:true}); }
+      }
+      const trigger = [...document.querySelectorAll('[data-pay], [data-pending-id], [data-edit]')].find(el => (el.dataset.pay || el.dataset.pendingId || el.dataset.edit) === id);
+      if (trigger) { trigger.scrollIntoView({ block: "center" }); trigger.focus({ preventScroll: true }); }
+    };
+  });
+}
+function downloadCsv(name, rows) {
+  const url = URL.createObjectURL(new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url; link.download = `crazsix-${name}-${todayStr()}.csv`;
+  document.body.append(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast("ส่งออก CSV แล้ว");
+}
+function transactionExportRows(rows) {
+  return [["รหัส", "วันที่", "ประเภท", "หมวดหมู่", "รายละเอียด", "ยอดรายการ", "เงินรับจริง", "เงินจ่ายจริง", "จำนวนขาย", "กำไรขายก่อนแอด", "รหัส pre-order", "รหัสแคมเปญแอด"], ...rows.map(tx => [tx.id, tx.date, tx.type, tx.category, tx.desc, tx.amount, tx.type === "income" ? tx.amount : 0, tx.type === "expense" ? tx.amount : 0, tx.qty || 0, tx.profit ?? "", tx.preorderId || "", tx.adCampaignId || ""])];
+}
+function wireExportTools() {
+  document.querySelectorAll("[data-export]").forEach(button => {
+    button.onclick = () => {
+      const kind = button.dataset.export;
+      if (kind === "inventory") downloadCsv(kind, [["รหัสสินค้า", "รหัสตัวเลือก", "สินค้า", "สี", "ไซส์", "อก (นิ้ว)", "ความยาว (นิ้ว)", "สภาพ", "คงเหลือ", "ต้นทุนต่อชิ้น", "ราคาขาย", "มูลค่าสต็อก"], ...allVariants().map(({product, variant: v}) => [product.id, v.id, product.name, v.color, v.size, v.chestInches ?? "", v.lengthInches ?? "", v.type, v.qty, v.cost, v.price, money(v.qty * v.cost)])]);
+      else if (kind === "preorders") downloadCsv(kind, [["รหัส", "ลูกค้า", "ติดต่อ", "สินค้า", "สี", "ไซส์", "จำนวน", "ยอดรวม", "รับแล้ว", "คืนแล้ว", "ค้างชำระ", "สถานะ", "วันนัดส่ง", "หมายเหตุ"], ...preorders.map(o => [o.id, o.customer, o.contact, o.name, o.color, o.size, o.qty, preorderTotal(o), o.paidAmount, o.refundedAmount, preorderBalance(o), preorderStatuses[o.status], o.dueDate, o.note])]);
+      else {
+        let rows = transactions;
+        if (kind === "filtered-transactions") rows = rows.filter(tx => (!txSearch || normalizedText([tx.desc, tx.category, tx.date].join(" ")).includes(normalizedText(txSearch))) && (txTypeFilter === "all" || tx.type === txTypeFilter) && (!txMonthFilter || tx.date.startsWith(txMonthFilter)));
+        downloadCsv(kind, transactionExportRows(rows));
+      }
+    };
+  });
+}
+function renderRangeReport() {
+  return `<div class="panel"><h2>รายงานตามช่วงวันที่</h2><div class="task-filters"><div class="field"><label>ตั้งแต่วันที่</label><input id="report-from" type="date" value="${reportFrom}"></div><div class="field"><label>ถึงวันที่</label><input id="report-to" type="date" value="${reportTo}"></div><button class="btn btn-ghost" id="report-clear">ทุกช่วงเวลา</button><button class="btn btn-primary" id="report-export">ส่งออกช่วงนี้ CSV</button></div><p class="hint" id="report-range-error" role="status"></p><div id="report-range-summary" class="stats range-stats"></div><p class="hint">เงินสดสุทธิคิดตามวันที่รับ/จ่ายจริง กำไรจากการขายคิดเฉพาะยอดขายในช่วงนี้ หักต้นทุนสินค้า ค่าส่ง และค่ากลางแล้ว กำไรหลังแอดหักค่าแอดที่จ่ายในช่วงวันที่เลือกอีกครั้งหนึ่งจากกำไรขาย ยังไม่หักค่าใช้จ่ายทั่วไปของร้าน ตารางและกราฟด้านล่างแสดงกำไรก่อนค่าแอดและเป็นภาพรวมทุกช่วงเวลา</p></div>`;
+}
+function wireRangeReport() {
+  const from = document.getElementById("report-from"), to = document.getElementById("report-to");
+  if (!from) return;
+  const update = () => {
+    reportFrom = from.value; reportTo = to.value;
+    const valid = (!reportFrom || validDateString(reportFrom)) && (!reportTo || validDateString(reportTo)) && (!reportFrom || !reportTo || reportFrom <= reportTo);
+    document.getElementById("report-range-error").textContent = valid ? "" : "วันที่เริ่มต้นต้องไม่อยู่หลังวันที่สิ้นสุด";
+    document.getElementById("report-export").disabled = !valid;
+    const summary = document.getElementById("report-range-summary");
+    if (!valid) { summary.innerHTML = ""; return null; }
+    const stats = cashSummary(transactions, reportFrom, reportTo);
+    summary.innerHTML = metric("เงินรับจริง", fmtMoney(stats.income), `${stats.rows.length} รายการในช่วงนี้`, "up") + metric("เงินจ่ายจริง", fmtMoney(stats.expense), "ต้นทุนซื้อเข้าและค่าใช้จ่าย", "down") + metric("เงินสดสุทธิ", fmtMoney(stats.cash), "เงินรับ − เงินจ่าย", "wallet") + metric("กำไรจากการขาย", fmtMoney(stats.profit), `ขาย ${stats.qty} ชิ้น · ยอดขาย ${fmtMoney(stats.sales)} · ก่อนค่าแอด`, "chart") + metric("ค่าแอดจ่ายในช่วงนี้", fmtMoney(stats.rows.filter(isAdSpend).reduce((sum,tx) => sum + tx.amount,0)), "รวมทุกแคมเปญตามวันที่จ่าย", "down") + metric("กำไรขายหลังหักแอด", fmtMoney(stats.profit - stats.rows.filter(isAdSpend).reduce((sum,tx) => sum + tx.amount,0)), "ค่าแอดลงเงินจ่ายจริงแล้ว ไม่หักเงินสดซ้ำ", "wallet");
+    return stats;
+  };
+  from.onchange = to.onchange = update;
+  document.getElementById("report-clear").onclick = () => { from.value = ""; to.value = ""; update(); };
+  document.getElementById("report-export").onclick = () => { const stats = update(); if (stats) downloadCsv("report", transactionExportRows(stats.rows)); };
+  update();
+}
+
+// ---------- Physical stock counts ----------
+function renderStocktake() {
+  const variants = allVariants();
+  const history = variants.flatMap(({ product, variant }) => (variant.adjustments || []).map(entry => ({ ...entry, label: variantLabel(product, variant) }))).sort((a,b) => b.date.localeCompare(a.date));
+  return `<h2>ตรวจนับและปรับยอดสต็อก</h2><p class="hint">ใช้เมื่อนับของจริงแล้วไม่ตรงกับระบบ ต้องระบุเหตุผล ระบบเก็บยอดก่อน–หลังและคงต้นทุนต่อชิ้นเดิม การปรับยอดนี้ไม่ใช่การซื้อ/ขายและไม่ลงบัญชีอัตโนมัติ</p>
+    <form id="stocktake-form"><div class="form-grid"><div class="field"><label>ค้นหาสินค้าที่ตรวจนับ</label><input id="stocktake-search" type="search" placeholder="ชื่อสินค้า สี หรือไซส์"></div><div class="field"><label>สินค้า / สี / ไซส์</label><select name="variantId" required><option value="">เลือกสินค้าที่ตรวจนับ</option>${variants.map(({product,variant}) => `<option value="${escapeHtml(variant.id)}">${escapeHtml(variantLabel(product,variant))}</option>`).join("")}</select></div><div class="field"><label>จำนวนที่นับได้จริง</label><input name="actual" type="number" min="0" step="1" required></div><div class="field"><label>เหตุผลการปรับยอด</label><input name="reason" maxlength="500" required placeholder="เช่น ของเสียหาย / ตรวจนับปลายเดือน"></div></div><p class="hint" id="stocktake-preview" role="status">เลือกสินค้าเพื่อดูยอดปัจจุบัน</p><button type="submit" class="btn btn-primary">บันทึกผลตรวจนับ</button></form>
+    <h3>ประวัติปรับยอดตรวจนับ</h3><p class="hint">รวมการเปลี่ยนจำนวนจากหน้าแก้ไขสินค้า เก็บอยู่กับตัวเลือกสินค้าและอยู่ในไฟล์สำรอง JSON เมื่อลบตัวเลือกสินค้า ประวัติของตัวเลือกนั้นจะถูกลบด้วย</p>
+    ${history.length ? `<table><thead><tr><th>เวลา</th><th>สินค้า</th><th>ก่อน</th><th>หลัง</th><th>ผลต่าง</th><th>เหตุผล</th></tr></thead><tbody>${history.map(entry => `<tr><td>${escapeHtml(new Date(entry.date).toLocaleString("th-TH"))}</td><td>${escapeHtml(entry.label)}</td><td>${entry.before}</td><td>${entry.after}</td><td>${entry.delta > 0 ? "+" : ""}${entry.delta}</td><td>${escapeHtml(entry.reason)}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">ยังไม่มีประวัติปรับยอดตรวจนับ</div>'}`;
+}
+function wireStocktake() {
+  const form = document.getElementById("stocktake-form");
+  if (!form) return;
+  const select = form.elements.namedItem("variantId"), actual = form.elements.namedItem("actual");
+  let expected = null;
+  const preview = () => {
+    const parsed = Number(actual.value);
+    document.getElementById("stocktake-preview").textContent = expected == null ? "เลือกสินค้าเพื่อดูยอดปัจจุบัน" : `ในระบบ ${expected} ชิ้น${actual.value !== "" && Number.isSafeInteger(parsed) && parsed >= 0 ? ` → นับได้ ${parsed} ชิ้น · ผลต่าง ${parsed - expected > 0 ? "+" : ""}${parsed - expected}` : ""}`;
+  };
+  select.onchange = () => { expected = findVariant(select.value)?.variant.qty ?? null; actual.value = ""; preview(); };
+  actual.oninput = preview;
+  document.getElementById("stocktake-search").oninput = event => {
+    const q = normalizedText(event.target.value);
+    for (const option of select.options) option.hidden = Boolean(option.value && option.value !== select.value && !normalizedText(option.textContent).includes(q));
+  };
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (savingStores.size) return;
+    try {
+      const found = findVariant(select.value);
+      if (!found || actual.value === "") throw new Error("กรุณาเลือกสินค้าและระบุจำนวนที่นับได้");
+      const entry = stockAdjustment(found.variant, Number(actual.value), expected, form.elements.namedItem("reason").value, uid(), new Date().toISOString());
+      found.variant.adjustments = [...(found.variant.adjustments || []), entry];
+      found.variant.qty = entry.after;
+      await saveProducts();
+      render();
+    } catch (error) {
+      if (!error.storageReported) showAlert(error.message || "บันทึกผลตรวจนับไม่สำเร็จ");
+    }
+  };
+}
+
+
+// ---------- Advertising workspace ----------
+function wireAdsTab() {
+  wireAds(copyData(storeValues()), {
+    today: todayStr(), fmt: fmtMoney, confirm: showConfirm, alert: showAlert, csv: downloadCsv,
+    openProduct: openProductAggDetail,
+    commit: async action => {
+      if (savingStores.size) return;
+      const next = applyAdAction(storeValues(), action, uid(), todayStr());
+      adCampaigns = next.adCampaigns;
+      transactions = next.transactions;
+      await saveData("adCampaigns", "transactions", "products");
+      render();
+    },
+  });
+}
+function renderProductAds(productId) {
+  const product = products.find(p => p.id === productId);
+  if (!product) return "";
+  const m = productAdMetrics(product, adCampaigns, transactions, todayStr());
+  return `<section class="product-ad-detail"><h3>ค่าแอดของสินค้า (รวมทุกสี/ไซส์)</h3><p>ผูก ${m.linked.length} แคมเปญ · ค่าแอดจ่ายจริง ${fmtMoney(m.spend)}</p><p><strong>กำไรสินค้าหลังหักแอด ${fmtMoney(m.net)}</strong></p><p class="hint">ยอดขายทั้งหมดของสินค้านี้ ก่อนแอด ${fmtMoney(m.profit)} − ค่าแอด ${fmtMoney(m.spend)} · งบต่อชิ้นสำหรับวางราคา ${fmtMoney(m.plannedPerUnit)} จากแคมเปญที่เปิดใช้งานหรือยังไม่เริ่ม ต้นทุนซื้อในสต็อกยังคงเดิม</p><button class="btn btn-ghost" data-product-ads="${escapeHtml(product.id)}">จัดการแอดของสินค้านี้</button></section>`;
+}
+function wireProductAds() {
+  document.querySelectorAll('[data-product-ads]').forEach(button => button.onclick = () => {
+    const id = button.dataset.productAds;
+    closeDetail(); navigateTo('ads');
+    document.getElementById('ad-search').value = products.find(p => p.id === id)?.name || '';
+    document.getElementById('ad-filter').value = 'all';
+    document.getElementById('ad-filter').dispatchEvent(new Event('change'));
+    const form = document.getElementById('ad-create-form');
+    if (form) { form.elements.namedItem('productId').value = id; form.elements.namedItem('productId').dispatchEvent(new Event('change', {bubbles:true})); }
+    const card = [...document.querySelectorAll('[data-ad-id]')].find(card => adCampaigns.some(c => c.id === card.dataset.adId && campaignHasProduct(c, id)));
+    if (card && !card.hidden) card.scrollIntoView({block:'start'});
+    else document.getElementById('ad-create').open = true;
+  });
+}
+
+function updateReportChartTheme() {
+  const dark = document.documentElement.dataset.theme === 'dark';
+  const colors = getComputedStyle(document.documentElement);
+  const text = colors.getPropertyValue('--ink-soft').trim();
+  const grid = colors.getPropertyValue('--line').trim();
+  for (const chart of [trendChartInstance, sellersChartInstance]) {
+    if (!chart) continue;
+    chart.options.color = text;
+    if (chart.options.plugins.legend) chart.options.plugins.legend.labels.color = text;
+    for (const axis of Object.values(chart.options.scales)) {
+      axis.ticks.color = text;
+      axis.grid.color = grid;
+      axis.border.color = grid;
+    }
+    if (chart === trendChartInstance) {
+      chart.data.datasets.forEach((dataset, index) => {
+        dataset.borderColor = (dark ? ['#76b9a2', '#dc8e9d', '#a2afe8'] : ['#1f8a5c', '#d1435b', '#16214a'])[index];
+        dataset.backgroundColor = dataset.borderColor + '18';
+      });
+    } else chart.data.datasets[0].backgroundColor = dark ? '#8799d4' : '#37448c';
+    chart.update('none');
+  }
+}
+window.addEventListener('themechange', updateReportChartTheme);

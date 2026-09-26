@@ -181,7 +181,7 @@ test('backup round trip preserves customer orders; mismatched payments and dupli
   const stream = await (await downloaded).createReadStream();
   const chunks = []; for await (const chunk of stream) chunks.push(chunk);
   const data = JSON.parse(Buffer.concat(chunks).toString());
-  expect(data).toMatchObject({ version: 4, preorders: state.preorders });
+  expect(data).toMatchObject({ version: 7, preorders: state.preorders });
   const upload = async payload => page.locator('#import-input').setInputFiles({ name: 'backup.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(payload)) });
   await upload(data);
   await page.locator('#modal-ok-btn').click();

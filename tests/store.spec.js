@@ -298,7 +298,7 @@ test('manual transaction and backup export/import preserve original features', a
   const chunks = [];
   for await (const chunk of stream) chunks.push(chunk);
   const backup = JSON.parse(Buffer.concat(chunks).toString());
-  expect(backup.version).toBe(4);
+  expect(backup.version).toBe(7);
   expect(backup.transactions[0].amount).toBe(1200);
 
   const imported = { version: 3, ...inventory(), transactions: [{ id: 'imported-tx', type: 'income', category: 'รายรับอื่นๆ', desc: 'นำเข้า', amount: 77, date: today() }] };
@@ -310,12 +310,12 @@ test('manual transaction and backup export/import preserve original features', a
 });
 
 for (const width of [1440, 390]) {
-  test(`all eight sections remain reachable without page overflow at ${width}px`, async ({ page }) => {
+  test(`all ten sections remain reachable without page overflow at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: width < 500 ? 844 : 1000 });
     const seed = inventory();
     seed.transactions = [{ id: 'installment-fixture', type: 'installment', category: 'ขายสินค้า', desc: 'รายการผ่อนทดสอบ', amount: 500, paidAmount: 100, date: today(), dueDate: today(), productId: 'variant-1', qty: 2, profit: 300 }];
     const errors = await boot(page, seed);
-    for (const tab of ['home', 'stock', 'preorder', 'sell', 'installment', 'tx', 'report', 'ai']) {
+    for (const tab of ['home', 'tasks', 'stock', 'ads', 'preorder', 'sell', 'installment', 'tx', 'report', 'ai']) {
       await nav(page, tab);
       await expect(page.locator('#tab-content')).not.toBeEmpty();
       const dimensions = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));

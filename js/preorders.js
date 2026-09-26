@@ -1,3 +1,4 @@
+import { measurementsOf, measurementLabel } from "./inventory-tools.js";
 // Customer orders are independent of the store's supplier pendingOrders.
 export const preorderStatuses = {
   awaiting: "รับจองแล้ว",
@@ -96,9 +97,11 @@ export function updatePreorder(state, id, action, data, context) {
     if (commission > 0) recordCash(state, order, commission, "expense", "ค่ากลาง pre-order", context);
     state.transactions.unshift({
       id: context.uid(), type: "preorder", category: "ขายสินค้า", preorderId: order.id,
-      desc: `${order.name} ×${order.qty} — ${order.customer} (pre-order)`,
+      desc: `${order.name} ×${order.qty} — ${order.customer} (pre-order)${variant && measurementLabel(variant) ? " · " + measurementLabel(variant) : ""}`,
       date: context.today, amount: preorderTotal(order), qty: order.qty, unitPrice: order.unitPrice, productName: order.name,
       unitCost, shipping, commission, productId: variant?.id || null,
+      ...(variant ? measurementsOf(variant) : {}),
+      ...(variant ? { stockProductId: state.products.find(p => p.variants.some(v => v.id === variant.id)).id } : {}),
       profit: money(preorderTotal(order) - unitCost * order.qty - shipping - commission),
     });
     order.status = "completed";

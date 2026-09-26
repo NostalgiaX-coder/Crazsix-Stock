@@ -55,7 +55,7 @@ function comparable(value) {
 
 /**
  * ชั้นข้อมูลกลางสำหรับแอปสต็อก
- * เอกสารถูกแยกตามชนิดข้อมูล: products, transactions, pendingOrders, preorders
+ * เอกสารถูกแยกตามชนิดข้อมูล: products, transactions, pendingOrders, preorders, adCampaigns
  */
 export const stockDatabase = {
   async get(name) {
