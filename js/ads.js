@@ -102,6 +102,7 @@ export function validateAdsBackup(campaigns, transactions, products) {
         new Set(a.map(row => row?.productId)).size === a.length && a.every(row => row && campaignHasProduct(c, row.productId) && cash(row.amount)) &&
         Math.abs(a.reduce((sum,row) => sum + row.amount, 0) - tx.amount) < .001);
     }
+    if (tx.deliveryStatus === "cancelled" && tx.category === "ขายสินค้ายกเลิก") tx = {...tx,category:"ขายสินค้า"};
     return isAdSale(tx) && products.some(p => campaignHasProduct(c,p.id) && saleMatchesProduct(tx,p)) && cash(tx.amount) && Number.isSafeInteger(tx.qty) && tx.qty > 0;
   });
 }
@@ -148,7 +149,7 @@ export function applyAdAction(state, action, id, today) {
     if (campaign) {
       const removed = selectedProducts.filter(p => !campaignHasProduct(next,p.id));
       if (removed.some(p => transactions.some(tx => tx.adCampaignId === campaign.id &&
-        ((isAdSpend(tx) && adSpendAllocations(tx,campaign).some(a => a.productId === p.id)) || saleMatchesProduct(tx,p)))))
+        ((isAdSpend(tx) && adSpendAllocations(tx,campaign).some(a => a.productId === p.id)) || saleMatchesProduct(tx,p) || (tx.deliveryStatus === "cancelled" && saleMatchesProduct({...tx,category:"ขายสินค้า"},p))))))
         throw new Error('สินค้าที่มีต้นทุนหรือยอดขายผูกอยู่แล้วไม่สามารถนำออกได้ แต่เพิ่มสินค้าอื่นได้');
       // Freeze historical shares before adding products, including old single-product campaigns.
       transactions.filter(tx => tx.adCampaignId === campaign.id && isAdSpend(tx) && !tx.adAllocations).forEach(tx => { tx.adAllocations = adSpendAllocations(tx,campaign); });

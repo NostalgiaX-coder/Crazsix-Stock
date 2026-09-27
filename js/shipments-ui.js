@@ -1,4 +1,4 @@
-import { deliveryLabels, pendingDeliveries } from './shipments.js';
+import { cancellationRefundDue, deliveryLabels, pendingDeliveries } from './shipments.js';
 
 export function renderShipments({transactions,shipments=[]},{esc,today,fmt,metric}) {
   const pending = pendingDeliveries(transactions,shipments);
@@ -10,7 +10,7 @@ export function renderShipments({transactions,shipments=[]},{esc,today,fmt,metri
     <div class="shipment-selection-tools"><label><input id="shipment-select-all" type="checkbox"> เลือกทุกรายการที่แสดง</label><button id="shipment-clear" class="btn btn-ghost btn-sm" type="button">ล้างที่เลือก</button></div>
     <div class="shipment-pending-list">${pending.map(({sale:tx,shipped,remaining})=>`<article class="shipment-pending-row" data-pending-sale="${esc(tx.id)}" data-search="${esc([tx.id,tx.desc,tx.customerNote].join(' ').toLowerCase())}">
       <label class="shipment-item-label"><input class="shipment-select" type="checkbox" value="${esc(tx.id)}"><span><strong>${esc(tx.desc || 'รายการขาย')}</strong><small>${esc(tx.customerNote || 'ยังไม่ระบุผู้รับ')} · ขาย ${tx.date} · รหัส ${esc(tx.id)}</small><span class="tag preorder">${deliveryLabels[tx.deliveryStatus]} · เหลือส่ง ${remaining} ชิ้น</span><small>ขาย ${tx.qty} · ส่งแล้ว ${shipped} ชิ้น${outstanding(tx)>0 ? ` · ค้างชำระ ${fmt(outstanding(tx))}` : ''}</small></span></label>
-      <div class="field"><label for="send-qty-${esc(tx.id)}">จำนวนที่จะส่ง</label><input id="send-qty-${esc(tx.id)}" class="shipment-qty" type="number" min="1" max="${remaining}" step="1" value="${remaining}" disabled required></div>
+      <div class="field"><label for="send-qty-${esc(tx.id)}">จำนวนที่จะส่ง</label><input id="send-qty-${esc(tx.id)}" class="shipment-qty" type="number" min="1" max="${remaining}" step="1" value="${remaining}" disabled required>${shipped===0 ? `<label for="cancel-reason-${esc(tx.id)}">เหตุผลยกเลิก (ถ้ามี)</label><input id="cancel-reason-${esc(tx.id)}" class="cancel-sale-reason" maxlength="500"><button type="button" class="btn btn-ghost danger-text" data-cancel-sale="${esc(tx.id)}">ยกเลิกการขาย / คืนสต็อก</button>` : '<small class="hint">ส่งบางส่วนแล้ว ไม่สามารถยกเลิกการขายทั้งรายการได้</small>'}</div>
     </article>`).join('')}</div><p id="shipment-empty" class="hint" ${pending.length ? 'hidden' : ''}>ไม่มีสินค้ารอส่งที่ตรงกับการค้นหา</p>
     <p id="shipment-selection-summary" class="hint" aria-live="polite"></p>
     <div class="form-grid"><div class="field"><label for="shipment-recipient">ผู้รับ / เลขคำสั่งซื้อ (ถ้ามี)</label><input id="shipment-recipient" name="recipient" maxlength="2000"></div>
@@ -20,6 +20,7 @@ export function renderShipments({transactions,shipments=[]},{esc,today,fmt,metri
     <div class="field"><label for="shipment-note">หมายเหตุ</label><textarea id="shipment-note" name="note" maxlength="1000" rows="2"></textarea></div></div>
     <button id="shipment-submit" class="btn btn-primary" type="submit" disabled>ส่งสินค้าแล้ว</button></form>
     <p class="hint">ยอดขายเก่าที่ยังไม่มีสถานะจัดส่งไม่ถูกนำมาขึ้นรอส่งอัตโนมัติ ส่วน pre-order ที่กดยืนยันส่งมอบแล้วจัดการอยู่ในประวัติ pre-order</p></section>
+    <section class="panel"><h2>รายการขายที่ยกเลิก</h2><p class="hint">คืนสินค้าเข้าสต็อกแล้ว รายการที่รับเงินจากลูกค้ายังรอคืนเงิน กดบันทึกคืนเงินแล้วเมื่อคืนเงินจริง การกดปุ่มนี้ไม่โอนเงินให้อัตโนมัติ</p>${transactions.filter(t=>t.deliveryStatus==='cancelled').map(t=>`<article class="shipment-history-card" data-cancelled-sale="${esc(t.id)}"><h3>${esc(t.desc)}</h3><p>ยกเลิก ${t.cancelledAt} · คืนสต็อก ${t.qty} ชิ้น</p><p>${esc(t.cancellationReason || 'ไม่ระบุเหตุผล')}</p><p>รอคืนเงิน ${fmt(t.refundDue-t.refundedAmount)} · คืนแล้ว ${fmt(t.refundedAmount)}</p>${t.refundDue>t.refundedAmount ? `<button class="btn btn-primary" data-refund-sale="${esc(t.id)}">บันทึกคืนเงินแล้ว ${fmt(t.refundDue-t.refundedAmount)}</button>` : '<span class="tag income">ไม่มีเงินรอคืน</span>'}</article>`).join('') || '<p class="hint">ยังไม่มีรายการขายที่ยกเลิก</p>'}</section>
     <section class="panel"><div class="section-heading"><h2>ประวัติการส่งสินค้า</h2><button id="shipment-export" class="btn btn-ghost">ส่งออกการจัดส่ง CSV</button></div>
     <div class="shipment-history">${shipments.map(s=>`<article class="shipment-history-card" data-shipment-id="${esc(s.id)}"><div class="section-heading"><h3>${esc(s.recipient || 'พัสดุ '+s.id)}</h3><span class="tag ${s.status==='cancelled'?'expense':'income'}">${s.status==='cancelled'?'ยกเลิกการบันทึกส่ง':'ส่งสินค้าแล้ว'}</span></div>
       <p>${s.date} · ${esc(s.carrier || 'ไม่ระบุขนส่ง')} · เลขพัสดุ ${esc(s.trackingNumber || 'ยังไม่ระบุ')}</p>${s.note ? `<p>${esc(s.note)}</p>` : ''}
@@ -50,6 +51,12 @@ export function wireShipments(state,{commit,confirm,alert,csv}) {
   document.getElementById('shipment-search').oninput=e=>{rows.forEach(r=>{r.hidden=!r.dataset.search.includes(e.target.value.trim().toLowerCase());});update();};
   const expectedSales = ids => Object.fromEntries(ids.map(id=>[id,JSON.stringify(state.transactions.find(tx=>tx.id===id))]));
   const run = async(action,question) => {try {if (await confirm(question)) await commit({...action,expectedShipments:JSON.stringify(state.shipments || [])});} catch(e) {if (!e.storageReported) alert(e.message);}};
+  document.querySelectorAll('[data-cancel-sale]').forEach(button=>button.onclick=()=>{
+    const tx=state.transactions.find(t=>t.id===button.dataset.cancelSale);
+    const reason=button.closest('[data-pending-sale]').querySelector('.cancel-sale-reason').value.trim();
+    run({type:'cancelSale',saleId:tx.id,reason,expectedSales:expectedSales([tx.id])},`ยกเลิกการขาย ${tx.desc}?\nคืนสินค้า ${tx.qty} ชิ้นเข้าสต็อก และตัดยอดขาย/หนี้ค้างชำระออก\nเงินที่รับแล้ว ${cancellationRefundDue(tx)} บาทจะอยู่ในรายการรอคืนเงิน\nค่าส่ง ค่ากลาง และค่าแอดที่จ่ายแล้วจะยังคงอยู่ในบัญชี`);
+  });
+  document.querySelectorAll('[data-refund-sale]').forEach(button=>button.onclick=()=>{const tx=state.transactions.find(t=>t.id===button.dataset.refundSale);run({type:'refundSale',saleId:tx.id,expectedSales:expectedSales([tx.id])},`ยืนยันว่าคืนเงินให้ลูกค้าจริงแล้ว ${tx.refundDue-tx.refundedAmount} บาท? ระบบจะบันทึกรายจ่ายคืนเงินวันนี้`);});
   form.onsubmit=e=>{
     e.preventDefault(); const items=selected().map(r=>({saleId:r.dataset.pendingSale,qty:Number(r.querySelector('.shipment-qty').value)}));
     if (!items.length) {alert('เลือกสินค้าที่รอส่งอย่างน้อย 1 รายการ');return;}

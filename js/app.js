@@ -112,7 +112,7 @@ document.getElementById("edit-overlay").onclick = (e) => {
 let payingTxId = null;
 function openPaymentModal(txId) {
   const tx = transactions.find(
-    (t) => t.id === txId && t.type === "installment",
+    (t) => t.id === txId && t.type === "installment" && t.deliveryStatus !== "cancelled",
   );
   if (!tx) return;
   payingTxId = txId;
@@ -386,7 +386,7 @@ const savePending = () => saveData("pendingOrders");
 function exportData() {
   const payload = {
     exportedAt: new Date().toISOString(),
-    version: 10,
+    version: 11,
     products,
     transactions,
     pendingOrders,
@@ -1401,13 +1401,13 @@ async function sellVariant(variantId, data) {
 
 function openInstallments() {
   return transactions.filter(
-    (t) => t.type === "installment" && t.amount - (t.paidAmount || 0) > 0.001,
+    (t) => t.type === "installment" && t.deliveryStatus !== "cancelled" && t.amount - (t.paidAmount || 0) > 0.001,
   );
 }
 
 async function recordInstallmentPayment(saleTxId, amountStr) {
   const sale = transactions.find(
-    (t) => t.id === saleTxId && t.type === "installment",
+    (t) => t.id === saleTxId && t.type === "installment" && t.deliveryStatus !== "cancelled",
   );
   if (!sale) return false;
   const amount = Number(amountStr);
@@ -1474,13 +1474,16 @@ async function addManualTx(data) {
 }
 
 function isManualTransaction(tx) {
-  return ["income", "expense"].includes(tx.type) && !tx.adCampaignId && !tx.productId && !tx.installmentId && !tx.preorderId && !tx.items && !tx.pendingIds && tx.profit == null &&
+  return ["income", "expense"].includes(tx.type) && !tx.saleCancellationId && !tx.adCampaignId && !tx.productId && !tx.installmentId && !tx.preorderId && !tx.items && !tx.pendingIds && tx.profit == null &&
     (tx.source === "manual" || !["ขายสินค้า", "ค่าส่งสินค้าเข้า", "สั่งซื้อสินค้า (รอของมาส่ง)", "ค่าส่ง", "ค่ากลาง"].includes(tx.category));
 }
 
 async function deleteTx(id) {
   const target = transactions.find((tx) => tx.id === id);
   if (!target) return;
+  if (target.deliveryStatus === "cancelled" || target.saleCancellationId || transactions.some(t=>t.id===target.installmentId && t.deliveryStatus==="cancelled")) {
+    showAlert("รายการนี้ผูกกับการยกเลิกการขาย กรุณาจัดการคืนเงินจากเมนูรอส่ง"); return;
+  }
   if (shipments.some(s => s.items.some(i => i.saleId === id))) {
     showAlert("รายการขายมีประวัติการจัดส่งแล้ว ไม่สามารถลบจากบัญชีได้ กรุณาตรวจสอบที่เมนูรอส่ง");
     return;
@@ -3572,7 +3575,7 @@ function wireSellTab() {
 
 // ---------- Installments tab ----------
 function renderInstallmentsTab() {
-  const all = transactions.filter((t) => t.type === "installment");
+  const all = transactions.filter((t) => t.type === "installment" && t.deliveryStatus !== "cancelled");
   const today = todayStr();
   const outstanding = openInstallments().sort((a, b) =>
     String(a.dueDate || "").localeCompare(String(b.dueDate || "")),
@@ -4338,13 +4341,13 @@ let taskSearch = "";
 let taskFilter = "all";
 let reportFrom = "";
 let reportTo = "";
-const taskKinds = { shipment: "ขายแล้วรอส่ง", ads: "แคมเปญยิงแอด", stock: "สต็อกใกล้หมด", supplier: "ร้านสั่งรอรับ", preorder: "Pre-order ลูกค้า", installment: "ผ่อนค้างชำระ" };
+const taskKinds = { shipment: "จัดส่ง / คืนเงิน", ads: "แคมเปญยิงแอด", stock: "สต็อกใกล้หมด", supplier: "ร้านสั่งรอรับ", preorder: "Pre-order ลูกค้า", installment: "ผ่อนค้างชำระ" };
 function renderTasksTab() {
   const items = followUpItems(storeValues(), todayStr(), LOW_STOCK_THRESHOLD);
   return `<section class="stats tasks-stats">${metric("งานทั้งหมด", items.length, "อัปเดตจากรายการปัจจุบัน", "check")}${metric("ควรจัดการก่อน", items.filter(item => item.priority === 0).length, "สินค้าหมด เกินวันนัด หรือแอดเกินงบ", "clock", "expense-stat")}</section>
     <div class="panel"><h2>งานที่ต้องติดตาม</h2><p class="hint">สินค้ารอรับคือร้านสั่งมาขายเอง ส่วน pre-order คือรายการที่ลูกค้าสั่งกับร้าน วันที่ในรายการรอรับเป็นวันสั่งซื้อ ส่วนรายการลูกค้าเป็นวันครบกำหนด</p>
     <div class="task-filters"><div class="field"><label>ค้นหางาน</label><input id="task-search" type="search" value="${escapeHtml(taskSearch)}" placeholder="สินค้า ลูกค้า หรือหมายเหตุ"></div><div class="field"><label>ประเภทงาน</label><select id="task-filter">${Object.entries({ all: "ทุกประเภท", urgent: "ควรจัดการก่อน", ...taskKinds }).map(([key, label]) => `<option value="${key}" ${taskFilter === key ? "selected" : ""}>${label}</option>`).join("")}</select></div></div><p class="hint" id="task-count" role="status"></p>
-    <div class="task-list">${items.map(item => `<article class="task-card" data-task-kind="${item.kind}" data-task-priority="${item.priority}"><div><span class="tag ${item.priority === 0 ? "expense" : "preorder"}">${taskKinds[item.kind]}</span><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.detail)}</p>${item.date ? `<p class="hint">${item.kind === "supplier" ? "สั่งเมื่อ" : item.kind === "shipment" ? "ขายเมื่อ" : "ครบกำหนด"} ${escapeHtml(item.date)}</p>` : ""}</div><button class="btn btn-ghost" data-task-target="${item.target}" data-task-id="${escapeHtml(item.id)}" data-task-workspace="${item.workspace || ""}">เปิดรายการ</button></article>`).join("")}</div><div class="empty" id="task-empty" hidden>ไม่มีงานที่ตรงกับตัวกรอง</div></div>`;
+    <div class="task-list">${items.map(item => `<article class="task-card" data-task-kind="${item.kind}" data-task-priority="${item.priority}"><div><span class="tag ${item.priority === 0 ? "expense" : "preorder"}">${taskKinds[item.kind]}</span><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.detail)}</p>${item.date ? `<p class="hint">${item.kind === "supplier" ? "สั่งเมื่อ" : item.kind === "shipment" ? "วันที่รายการ" : "ครบกำหนด"} ${escapeHtml(item.date)}</p>` : ""}</div><button class="btn btn-ghost" data-task-target="${item.target}" data-task-id="${escapeHtml(item.id)}" data-task-workspace="${item.workspace || ""}">เปิดรายการ</button></article>`).join("")}</div><div class="empty" id="task-empty" hidden>ไม่มีงานที่ตรงกับตัวกรอง</div></div>`;
 }
 function wireTasksTab() {
   const search = document.getElementById("task-search"), filter = document.getElementById("task-filter");
@@ -4374,7 +4377,7 @@ function wireTasksTab() {
         const campaignCard = [...document.querySelectorAll('[data-ad-id]')].find(card => card.dataset.adId === id);
         if (campaignCard) { campaignCard.scrollIntoView({block:'start'}); campaignCard.querySelector('button')?.focus({preventScroll:true}); }
       }
-      if (target === "shipments") { const search = document.getElementById("shipment-search"); search.value = id; search.dispatchEvent(new Event("input")); }
+      if (target === "shipments") { const search = document.getElementById("shipment-search"); search.value = id; search.dispatchEvent(new Event("input")); const refund = [...document.querySelectorAll("[data-cancelled-sale]")].find(el=>el.dataset.cancelledSale===id); if(refund) refund.scrollIntoView({block:"center"}); }
       const trigger = [...document.querySelectorAll('[data-pay], [data-pending-id], [data-edit]')].find(el => (el.dataset.pay || el.dataset.pendingId || el.dataset.edit) === id);
       if (trigger) { trigger.scrollIntoView({ block: "center" }); trigger.focus({ preventScroll: true }); }
     };
@@ -4389,7 +4392,7 @@ function downloadCsv(name, rows) {
   toast("ส่งออก CSV แล้ว");
 }
 function transactionExportRows(rows) {
-  return [["รหัส", "วันที่", "ประเภท", "หมวดหมู่", "รายละเอียด", "ยอดรายการ", "เงินรับจริง", "เงินจ่ายจริง", "จำนวนขาย", "กำไรขายก่อนแอด", "รหัส pre-order", "รหัสแคมเปญแอด"], ...rows.map(tx => [tx.id, tx.date, tx.type, tx.category, tx.desc, tx.amount, tx.type === "income" ? tx.amount : 0, tx.type === "expense" ? tx.amount : 0, tx.qty || 0, tx.profit ?? "", tx.preorderId || "", tx.adCampaignId || ""])];
+  return [["รหัส", "วันที่", "ประเภท", "หมวดหมู่", "รายละเอียด", "ยอดรายการ", "เงินรับจริง", "เงินจ่ายจริง", "จำนวนขาย", "กำไรขายก่อนแอด", "รหัส pre-order", "รหัสแคมเปญแอด"], ...rows.map(tx => [tx.id, tx.date, tx.type, tx.category, tx.desc, tx.amount, tx.type === "income" ? tx.amount : 0, tx.type === "expense" ? tx.amount : 0, tx.deliveryStatus === "cancelled" ? 0 : tx.qty || 0, tx.deliveryStatus === "cancelled" ? "" : tx.profit ?? "", tx.preorderId || "", tx.adCampaignId || ""])];
 }
 function wireExportTools() {
   document.querySelectorAll("[data-export]").forEach(button => {
@@ -4537,8 +4540,9 @@ function wireShipmentsTab() {
     if (savingStores.size) return;
     const next = applyShipmentAction(storeValues(),action,uid(),todayStr());
     transactions = next.transactions; shipments = next.shipments;
-    await saveData("transactions","shipments");
+    if (action.type === "cancelSale") products = next.products;
+    await saveData("transactions","shipments", ...(action.type === "cancelSale" ? ["products"] : []));
     render();
-    toast(action.type === "ship" ? "บันทึกส่งสินค้าแล้ว" : "คืนรายการเข้ารอส่งแล้ว");
+    toast(action.type === "cancelSale" ? "ยกเลิกการขายและคืนสต็อกแล้ว" : action.type === "refundSale" ? "บันทึกคืนเงินแล้ว" : action.type === "ship" ? "บันทึกส่งสินค้าแล้ว" : "คืนรายการเข้ารอส่งแล้ว");
   }});
 }

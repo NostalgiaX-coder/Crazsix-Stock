@@ -48,7 +48,8 @@ export function followUpItems({ products, pendingOrders, preorders, transactions
     detail: `${order.status === 'ready' ? 'พร้อมส่งมอบ' : 'รอส่งมอบ'} · ค้างชำระ ฿${Math.max(0, order.qty * order.unitPrice - order.paidAmount).toLocaleString('th-TH', { maximumFractionDigits: 2 })}`,
     date: order.dueDate || '', target: 'preorder',
   });
-  for (const sale of transactions.filter(tx => tx.type === 'installment' && tx.amount - (tx.paidAmount || 0) > 0.001)) rows.push({
+  for (const tx of transactions.filter(t=>t.deliveryStatus==='cancelled' && t.refundDue>t.refundedAmount)) rows.push({kind:'shipment',id:tx.id,priority:1,title:tx.desc || 'ขายยกเลิก',detail:`รอคืนเงิน ฿${(tx.refundDue-tx.refundedAmount).toLocaleString('th-TH')}`,date:tx.cancelledAt,target:'shipments'});
+  for (const sale of transactions.filter(tx => tx.type === 'installment' && tx.deliveryStatus !== 'cancelled' && tx.amount - (tx.paidAmount || 0) > 0.001)) rows.push({
     kind: 'installment', id: sale.id, priority: sale.dueDate && sale.dueDate < today ? 0 : 1,
     title: sale.customerNote || sale.desc || 'รายการผ่อนชำระ',
     detail: `ค้างชำระ ฿${(sale.amount - (sale.paidAmount || 0)).toLocaleString('th-TH', { maximumFractionDigits: 2 })}`,
