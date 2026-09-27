@@ -1,4 +1,4 @@
-import { deliveryLabels, pendingDeliveries, validateShipments, applyShipmentAction } from "./shipments.js";
+import { cancelledSaleFor, activeAccountingTransactions, deliveryLabels, pendingDeliveries, validateShipments, applyShipmentAction } from "./shipments.js";
 import { renderShipments, wireShipments } from "./shipments-ui.js";
 import { campaignProductIds, campaignHasProduct, campaignUntilBudget, productAdMetrics, validateAdsBackup, validateAdWallet, applyAdAction, isAdSpend } from "./ads.js";
 import { renderAds, wireAds } from "./ads-ui.js";
@@ -659,11 +659,8 @@ function lowStockVariants() {
       variant.qty <= LOW_STOCK_THRESHOLD,
   );
 }
-function txForMonth(key) {
-  return transactions.filter((t) => monthKey(t.date) === key);
-}
 function monthSummary(key) {
-  const list = txForMonth(key);
+  const list = activeAccountingTransactions(transactions).filter(t => monthKey(t.date) === key);
   const income = list
     .filter((t) => t.type === "income")
     .reduce((s, t) => s + t.amount, 0);
@@ -1481,8 +1478,16 @@ function isManualTransaction(tx) {
 async function deleteTx(id) {
   const target = transactions.find((tx) => tx.id === id);
   if (!target) return;
-  if (target.deliveryStatus === "cancelled" || target.saleCancellationId || transactions.some(t=>t.id===target.installmentId && t.deliveryStatus==="cancelled")) {
-    showAlert("รายการนี้ผูกกับการยกเลิกการขาย กรุณาจัดการคืนเงินจากเมนูรอส่ง"); return;
+  if (cancelledSaleFor(target, transactions)) {
+    const reviewed = JSON.stringify(transactions);
+    if (!(await showConfirm("ลบรายการนี้ออกจากหน้ารายรับ–รายจ่าย? ระบบจะเก็บประวัติการยกเลิกการขายและคืนเงินไว้ในเมนูรอส่ง ไม่คืนสต็อกซ้ำและไม่เปลี่ยนยอดเงินรับ/จ่ายจริง"))) return;
+    if (reviewed !== JSON.stringify(transactions)) {
+      showAlert("รายการบัญชีเปลี่ยนแปลงระหว่างยืนยัน กรุณาตรวจสอบอีกครั้ง"); return;
+    }
+    transactions = transactions.map(tx => tx.id === id ? { ...tx, ledgerDeletedAt: todayStr() } : tx);
+    await saveTx();
+    render();
+    return;
   }
   if (shipments.some(s => s.items.some(i => i.saleId === id))) {
     showAlert("รายการขายมีประวัติการจัดส่งแล้ว ไม่สามารถลบจากบัญชีได้ กรุณาตรวจสอบที่เมนูรอส่ง");
@@ -1716,7 +1721,7 @@ function render() {
     <main class="main-content" id="main-content">
       <div class="topbar"><div class="breadcrumb">Workspace <span>/</span> <strong>${meta[1]}</strong></div><div class="topbar-right">${themeToggle()}<span class="sync-status"><span class="online-dot"></span>เชื่อมต่อแล้ว</span><span class="topbar-date">${icon("calendar")}${dateLabel}</span><span class="avatar avatar-small">C</span></div></div>
       <header class="page-header"><div><p class="eyebrow">${activeTab === "home" ? "YOUR STORE, AT A GLANCE" : "CRAZSIX STORE"}</p><h1>${meta[0]}<span class="heading-dot">.</span></h1><p class="subline">${meta[3]}</p></div><div class="header-actions"><button class="btn btn-ghost" data-go="stock" data-workspace="add">${icon("plus")}เพิ่มสินค้า</button><button class="btn btn-primary" data-go="sell">${icon("bag")}บันทึกการขาย</button></div></header>
-      ${activeTab === "home" ? `<section class="stats" aria-label="สรุปร้านเดือนนี้">${metric("มูลค่าสต็อก", fmtMoney(stockValue()), `${products.length} สินค้า · คงเหลือ ${totalQty.toLocaleString("th-TH")} ชิ้น`, "box")}${metric("รายรับเดือนนี้", fmtMoney(ms.income), "เงินที่รับแล้วในเดือนนี้", "up", "income-stat")}${metric("รายจ่ายเดือนนี้", fmtMoney(ms.expense), "รวมต้นทุนซื้อเข้าและค่าใช้จ่าย", "down", "expense-stat")}${metric("เงินสุทธิเดือนนี้", fmtMoney(ms.profit), "รายรับ − รายจ่าย", "wallet", "profit")}</section>` : ""}
+      ${activeTab === "home" ? `<section class="stats" aria-label="สรุปร้านเดือนนี้">${metric("มูลค่าสต็อก", fmtMoney(stockValue()), `${products.length} สินค้า · คงเหลือ ${totalQty.toLocaleString("th-TH")} ชิ้น`, "box")}${metric("รายรับเดือนนี้", fmtMoney(ms.income), "เงินรับเดือนนี้ ไม่รวมยอดขายยกเลิก", "up", "income-stat")}${metric("รายจ่ายเดือนนี้", fmtMoney(ms.expense), "รวมต้นทุนและค่าใช้จ่าย ไม่รวมเงินคืนขายยกเลิก", "down", "expense-stat")}${metric("เงินสุทธิเดือนนี้", fmtMoney(ms.profit), "รายรับ − รายจ่าย", "wallet", "profit")}</section>` : ""}
       <div id="tab-content" class="tab-content"></div>
       <footer><span>CRAZSIX <span class="footer-dot">•</span> Your everyday store companion</span><details class="data-tools"><summary>จัดการข้อมูล ${icon("chevron")}</summary><div class="footer-actions"><button id="export-btn">${icon("download")}สำรองข้อมูล</button><button id="import-btn">${icon("upload")}นำเข้าข้อมูล</button><button data-export="inventory">ส่งออกสต็อก CSV</button><button data-export="transactions">ส่งออกบัญชี CSV</button><button data-export="preorders">ส่งออก pre-order CSV</button><button id="reset-btn" class="danger-text">ล้างข้อมูลทั้งหมด</button></div></details><input type="file" id="import-input" accept=".json,application/json" hidden></footer>
     </main>`;
@@ -3643,7 +3648,8 @@ function wireInstallmentsTab() {
 
 // ---------- Transactions tab ----------
 function renderTxTab() {
-  const rows = [...transactions]
+  const visibleTransactions = transactions.filter(t => !t.ledgerDeletedAt);
+  const rows = visibleTransactions
     .sort((a, b) => b.date.localeCompare(a.date))
     .map(
       (t) => `
@@ -3710,7 +3716,7 @@ function renderTxTab() {
           "",
         )}</select></div><div class="field"><input id="tx-month-filter" type="month" aria-label="กรองตามเดือน" value="${txMonthFilter}"></div><button class="btn btn-ghost btn-sm" id="tx-clear-filters">ล้างตัวกรอง</button></div><p class="hint" id="tx-result-count" aria-live="polite"></p>
       ${
-        transactions.length === 0
+        visibleTransactions.length === 0
           ? `
         <div class="empty">
           <div class="big">ยังไม่มีรายการบัญชี</div>
@@ -3753,8 +3759,9 @@ function wireTxTab() {
       row.hidden = !match;
       if (match) count++;
     });
-    document.getElementById("tx-result-count").textContent = transactions.length
-      ? `แสดง ${count} จาก ${transactions.length} รายการ`
+    const visibleCount = transactions.filter(t => !t.ledgerDeletedAt).length;
+    document.getElementById("tx-result-count").textContent = visibleCount
+      ? `แสดง ${count} จาก ${visibleCount} รายการ`
       : "";
   }
   if (search) {
@@ -3915,7 +3922,7 @@ function renderReportTab() {
     </div>
   `;
 
-  return `<div class="panel"><h2>รายรับ–รายจ่ายรายเดือน</h2><p class="hint">เงินสดสุทธิ = เงินรับจริง − เงินจ่ายจริง ของแต่ละเดือน รวมต้นทุนสินค้าที่ซื้อเข้า</p>${rows}</div>${chartSection}${topSection}${saleSection}`;
+  return `<div class="panel"><h2>รายรับ–รายจ่ายรายเดือน</h2><p class="hint">ยอดสุทธิ = รายรับ − รายจ่ายของแต่ละเดือน ไม่รวมยอดขายยกเลิก เงินผ่อนที่รับจากยอดขายยกเลิก และเงินคืนที่เกี่ยวข้อง รวมต้นทุนสินค้าที่ซื้อเข้า ดูเงินรับ/จ่ายจริงได้ในรายงานตามช่วงวันที่</p>${rows}</div>${chartSection}${topSection}${saleSection}`;
 }
 
 let trendChartInstance = null;
@@ -4058,7 +4065,8 @@ function renderLocalInsights() {
   const previousKey = `${previousDate.getFullYear()}-${String(previousDate.getMonth() + 1).padStart(2, "0")}`;
   const sumAmount = (list) =>
     list.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
-  const monthToDate = transactions.filter(
+  const accountingTransactions = activeAccountingTransactions(transactions);
+  const monthToDate = accountingTransactions.filter(
     (t) => monthKey(t.date) === currentKey && t.date <= today,
   );
   const currentIncome = sumAmount(
@@ -4068,7 +4076,7 @@ function renderLocalInsights() {
     monthToDate.filter((t) => t.type === "expense"),
   );
   const previousIncome = sumAmount(
-    transactions.filter(
+    accountingTransactions.filter(
       (t) =>
         t.type === "income" &&
         monthKey(t.date) === previousKey &&
@@ -4402,14 +4410,14 @@ function wireExportTools() {
       else if (kind === "preorders") downloadCsv(kind, [["รหัส", "ลูกค้า", "ติดต่อ", "สินค้า", "สี", "ไซส์", "จำนวน", "ยอดรวม", "รับแล้ว", "คืนแล้ว", "ค้างชำระ", "สถานะ", "วันนัดส่ง", "หมายเหตุ"], ...preorders.map(o => [o.id, o.customer, o.contact, o.name, o.color, o.size, o.qty, preorderTotal(o), o.paidAmount, o.refundedAmount, preorderBalance(o), preorderStatuses[o.status], o.dueDate, o.note])]);
       else {
         let rows = transactions;
-        if (kind === "filtered-transactions") rows = rows.filter(tx => (!txSearch || normalizedText([tx.desc, tx.category, tx.date].join(" ")).includes(normalizedText(txSearch))) && (txTypeFilter === "all" || tx.type === txTypeFilter) && (!txMonthFilter || tx.date.startsWith(txMonthFilter)));
+        if (kind === "filtered-transactions") rows = rows.filter(tx => !tx.ledgerDeletedAt && (!txSearch || normalizedText([tx.desc, tx.category, tx.date].join(" ")).includes(normalizedText(txSearch))) && (txTypeFilter === "all" || tx.type === txTypeFilter) && (!txMonthFilter || tx.date.startsWith(txMonthFilter)));
         downloadCsv(kind, transactionExportRows(rows));
       }
     };
   });
 }
 function renderRangeReport() {
-  return `<div class="panel"><h2>รายงานตามช่วงวันที่</h2><div class="task-filters"><div class="field"><label>ตั้งแต่วันที่</label><input id="report-from" type="date" value="${reportFrom}"></div><div class="field"><label>ถึงวันที่</label><input id="report-to" type="date" value="${reportTo}"></div><button class="btn btn-ghost" id="report-clear">ทุกช่วงเวลา</button><button class="btn btn-primary" id="report-export">ส่งออกช่วงนี้ CSV</button></div><p class="hint" id="report-range-error" role="status"></p><div id="report-range-summary" class="stats range-stats"></div><p class="hint">เงินสดสุทธิคิดตามวันที่รับ/จ่ายจริง กำไรจากการขายคิดเฉพาะยอดขายในช่วงนี้ หักต้นทุนสินค้า ค่าส่ง และค่ากลางแล้ว กำไรหลังแอดหักค่าแอดที่จ่ายในช่วงวันที่เลือกอีกครั้งหนึ่งจากกำไรขาย ยังไม่หักค่าใช้จ่ายทั่วไปของร้าน ตารางและกราฟด้านล่างแสดงกำไรก่อนค่าแอดและเป็นภาพรวมทุกช่วงเวลา</p></div>`;
+  return `<div class="panel"><h2>รายงานตามช่วงวันที่</h2><div class="task-filters"><div class="field"><label>ตั้งแต่วันที่</label><input id="report-from" type="date" value="${reportFrom}"></div><div class="field"><label>ถึงวันที่</label><input id="report-to" type="date" value="${reportTo}"></div><button class="btn btn-ghost" id="report-clear">ทุกช่วงเวลา</button><button class="btn btn-primary" id="report-export">ส่งออกช่วงนี้ CSV</button></div><p class="hint" id="report-range-error" role="status"></p><div id="report-range-summary" class="stats range-stats"></div><p class="hint">เงินสดสุทธิรวมเงินรับและเงินคืนของยอดขายยกเลิกตามวันที่รับ/จ่ายจริง แม้ลบออกจากหน้าบัญชีแล้ว ส่วนสรุปรายเดือนตัดยอดขายยกเลิกและเงินคืนที่เกี่ยวข้องออก กำไรจากการขายคิดเฉพาะยอดขายในช่วงนี้ หักต้นทุนสินค้า ค่าส่ง และค่ากลางแล้ว กำไรหลังแอดหักค่าแอดที่จ่ายในช่วงวันที่เลือกอีกครั้งหนึ่งจากกำไรขาย ยังไม่หักค่าใช้จ่ายทั่วไปของร้าน ตารางและกราฟด้านล่างแสดงกำไรก่อนค่าแอดและเป็นภาพรวมทุกช่วงเวลา</p></div>`;
 }
 function wireRangeReport() {
   const from = document.getElementById("report-from"), to = document.getElementById("report-to");

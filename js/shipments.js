@@ -3,6 +3,12 @@ import { money } from './preorders.js';
 export const deliveryLabels = {pending:'รอส่ง', partial:'ส่งบางส่วน', shipped:'ส่งสินค้าแล้ว', cancelled:'ยกเลิกการขายแล้ว'};
 const sale = tx => tx && ['income','installment'].includes(tx.type) && ['ขายสินค้า','ขายสินค้ายกเลิก'].includes(tx.category);
 const cash = n => Number.isFinite(n) && n>=0 && n<=1e12 && Math.abs(n-money(n))<1e-7;
+// Receipts and refunds remain available for actual cash flow and refund reconciliation.
+export const cancelledSaleFor = (tx, transactions) => tx.deliveryStatus === 'cancelled' ? tx : transactions.find(parent => parent.deliveryStatus === 'cancelled' && (parent.id === tx.installmentId || parent.id === tx.saleCancellationId));
+export function activeAccountingTransactions(transactions) {
+  const cancelledIds = new Set(transactions.filter(tx=>tx.deliveryStatus==='cancelled').map(tx=>tx.id));
+  return transactions.filter(tx=>!cancelledIds.has(tx.id) && !cancelledIds.has(tx.installmentId) && !cancelledIds.has(tx.saleCancellationId));
+}
 export const cancellationRefundDue = tx => tx.type === 'installment' ? (tx.paidAmount || 0) : tx.amount;
 const validDate = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0,10) === value;
 const text = (value,max) => typeof value === 'string' && value.length <= max;
@@ -29,6 +35,10 @@ export function validateShipments(shipments,transactions) {
     }
   }
   return transactions.every(tx => {
+    if (tx.ledgerDeletedAt != null) {
+      const parent = cancelledSaleFor(tx, transactions);
+      if (!parent || !validDate(tx.ledgerDeletedAt) || tx.ledgerDeletedAt < parent.cancelledAt) return false;
+    }
     if (tx.saleCancellationId != null) {
       const parent=transactions.find(t=>t.id===tx.saleCancellationId);
       if (!parent || parent.deliveryStatus!=='cancelled' || tx.type!=='expense' || tx.category!=='คืนเงินขายยกเลิก' || !cash(tx.amount) || tx.amount<=0 || tx.date<parent.cancelledAt) return false;
