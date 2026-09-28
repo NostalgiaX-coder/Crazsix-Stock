@@ -9,7 +9,7 @@ async function create(page) {
  const form=page.locator('#ad-create-form');
  await form.locator('[name="name"]').fill('แอดเสื้อใหม่');
  await form.locator('[name="productId"]').selectOption('product-1');
- await form.locator('[name="budget"]').fill('300');
+
  await form.locator('[name="targetQty"]').fill('10');
  await form.locator('[type="submit"]').click();
  await expectSaved(page,db=>db.adCampaigns?.length===1);
@@ -17,10 +17,10 @@ async function create(page) {
 async function openSpend(page) { await page.locator('.ad-spend-details > summary').click();return page.locator('.ad-spend-form'); }
 async function exportText(page,selector) {const waiting=page.waitForEvent('download');await page.locator(selector).click();const d=await waiting;const chunks=[];for await (const chunk of await d.createReadStream())chunks.push(chunk);return Buffer.concat(chunks).toString();}
 
-test('campaign budgets plan unit costs; only actual spending affects cash and product profit', async ({page})=>{
+test('campaign creation needs no total budget; recorded spending affects cash and product profit', async ({page})=>{
  const errors=await boot(page);await create(page);
  let db=await snapshot(page);expect(db.transactions).toHaveLength(0);expect(db.products).toEqual(inventory().products);
- await expect(page.locator('.ad-card .ad-metrics')).toContainText('฿30');
+ await expect(page.locator('[name="budget"]')).toHaveCount(0);expect(db.adCampaigns[0].budget).toBeUndefined();
  const form=await openSpend(page);await form.locator('[name="amount"]').fill('120');await form.locator('[name="note"]').fill('บิลรอบแรก');await form.locator('button').click();
  await expectSaved(page,db=>db.transactions.length===1);
  db=await snapshot(page);expect(db.transactions[0]).toMatchObject({amount:120,type:'expense',category:'ค่าโฆษณาสินค้า',adCampaignId:db.adCampaigns[0].id});
@@ -34,7 +34,7 @@ test('campaign budgets plan unit costs; only actual spending affects cash and pr
 test('sale attribution records exactly once and computes net profit and the next ad reserve',async({page})=>{
  const errors=await boot(page,seeded({sales:false}));await nav(page,'sell');
  const card=page.locator('[data-sale-card]').first();await card.locator('.sell-ad-campaign').selectOption('ad-1');await card.locator('.sell-qty').fill('4');
- await expect(card.locator('.sell-ad-preview')).toContainText('฿480');
+ await expect(card.locator('.sell-ad-preview')).toContainText('ค่าแอดหักจากเครดิต Ads Manager');
  await card.locator('.sell-submit').click();await expectSaved(page,db=>db.transactions.some(t=>t.adCampaignId==='ad-1'&&t.category==='ขายสินค้า'));
  const db=await snapshot(page);expect(db.products[0].variants[0].qty).toBe(6);expect(db.transactions.filter(t=>t.category==='ขายสินค้า')).toHaveLength(1);
  expect(db.transactions.find(t=>t.category==='ขายสินค้า')).toMatchObject({adCampaignId:'ad-1',profit:600,stockProductId:'product-1'});
@@ -71,7 +71,7 @@ test('campaign edits, dates, loss floor and spending correction preserve account
  expect((await snapshot(page)).adCampaigns[0].startDate).toBe(today());
  // Reload the saved form instead of retaining the deliberately invalid edit.
  await nav(page,'home');await nav(page,'ads');let spending=await openSpend(page);await spending.locator('[name="amount"]').fill('500');await spending.locator('button').click();
- await expectSaved(page,db=>db.transactions.length===3);await expect(page.locator('.ad-warning').first()).toContainText('เกินงบ');await expect(page.locator('.ad-reserve strong')).toContainText('฿0');
+ await expectSaved(page,db=>db.transactions.length===3);await expect(page.locator('.ad-warning').first()).toContainText('ค่าแอดที่บันทึกเกินยอดเติมเงิน');await expect(page.locator('.ad-reserve strong')).toContainText('฿0');
  await openSpend(page);await page.locator('[data-ad-remove-spend]').first().click();await page.locator('#modal-ok-btn').click();await expectSaved(page,db=>db.transactions.length===2);await expect(page.locator('.ad-reserve strong')).toContainText('฿120');
 });
 
@@ -89,7 +89,7 @@ test('stale edits and confirmations reject changed campaign or ledger records',a
 });
 
 test('campaign backup round trips; malformed amounts, URLs and dangling attribution are rejected',async({page})=>{
- const state=seeded();await boot(page,state);await page.locator('.data-tools summary').click();const backup=JSON.parse(await exportText(page,'#export-btn'));expect(backup.version).toBe(12);expect(backup.adCampaigns).toEqual(state.adCampaigns);
+ const state=seeded();await boot(page,state);await page.locator('.data-tools summary').click();const backup=JSON.parse(await exportText(page,'#export-btn'));expect(backup.version).toBe(13);expect(backup.adCampaigns).toEqual(state.adCampaigns);
  const upload=async payload=>page.locator('#import-input').setInputFiles({name:'ads.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(payload))});
  await upload(backup);await page.locator('#modal-ok-btn').click();await expectSaved(page,db=>db.adCampaigns[0].id==='ad-1');
  for(const mutate of [s=>s.adCampaigns[0].reservePercent=101,s=>s.adCampaigns[0].budget=-1,s=>s.adCampaigns[0].url='javascript:alert(1)',s=>s.transactions[0].adCampaignId='missing',s=>s.adCampaigns[0].productId='missing',s=>s.adCampaigns.push({...s.adCampaigns[0]})]) {
@@ -117,11 +117,11 @@ for(const width of [390,1440]) test(`ads forms and linked product detail fit ${w
 });
 
 test('ended and overspent campaigns appear in follow-ups and open the correct campaign',async({page})=>{
- const state=seeded({overrides:{endDate:'2020-01-01',startDate:'2020-01-01',budget:100}});await boot(page,state);await nav(page,'tasks');await page.locator('#task-filter').selectOption('ads');await expect(page.locator('[data-task-kind]:visible')).toHaveCount(1);await expect(page.locator('[data-task-kind]:visible')).toContainText('เกินงบ ฿100');await page.locator('[data-task-kind]:visible button').click();await expect(page.locator('[data-ad-id="ad-1"]')).toBeVisible();
+ const state=seeded({overrides:{endDate:'2020-01-01',startDate:'2020-01-01',budget:100}});await boot(page,state);await nav(page,'tasks');await page.locator('#task-filter').selectOption('ads');await expect(page.locator('[data-task-kind]:visible')).toHaveCount(1);await expect(page.locator('[data-task-kind]:visible')).toContainText('เครดิตหมดแล้ว ฿0');await page.locator('[data-task-kind]:visible button').click();await expect(page.locator('[data-ad-id="ad-1"]')).toBeVisible();
 });
 
 test('product-level costs include every campaign, and reserve totals cannot exceed combined cash profit',async({page})=>{
- const state=seeded();state.adCampaigns.push(campaign({id:'ad-2',name:'แอดอีกรอบ',budget:500}));state.transactions.push(spend({id:'spend-2',amount:500,adCampaignId:'ad-2'}));await boot(page,state);await nav(page,'ads');await expect(page.locator('.ad-summary .val').last()).toHaveText('฿0');await page.locator('[data-ad-product]').first().click();await expect(page.locator('.product-ad-detail')).toContainText('กำไรสินค้าหลังหักแอด ฿-100');await expect(page.locator('.product-ad-detail')).toContainText('฿80');
+ const state=seeded();state.adCampaigns.push(campaign({id:'ad-2',name:'แอดอีกรอบ',budget:500}));state.transactions.push(spend({id:'spend-2',amount:500,adCampaignId:'ad-2'}));await boot(page,state);await nav(page,'ads');await expect(page.locator('.ad-summary .val').last()).toHaveText('฿0');await page.locator('[data-ad-product]').first().click();await expect(page.locator('.product-ad-detail')).toContainText('กำไรสินค้าหลังหักแอด ฿-100');await expect(page.locator('.product-ad-detail')).not.toContainText('งบต่อชิ้น');
 });
 
 test('a product cannot be deleted while a campaign is attached; unused campaigns can be deleted',async({page})=>{
@@ -135,6 +135,6 @@ test('ad validation rejects invalid future expenses and negative or fractional t
 });
 
 test('inventory attaches a new campaign to the selected product and keeps it linked after rename',async({page})=>{
- const state=inventory();state.products.push({id:'product-2',name:'กางเกง',variants:[{id:'variant-3',color:'ดำ',size:'L',type:'new',qty:5,cost:100,price:250}]});await boot(page,state);await nav(page,'stock');await page.locator('#workspace-inventory [data-product-ads="product-2"]').click();const form=page.locator('#ad-create-form');await expect(form.locator('[name="productId"]')).toHaveValue('product-2');await form.locator('[name="name"]').fill('แอดกางเกง');await form.locator('[name="budget"]').fill('100');await form.locator('[name="targetQty"]').fill('5');await form.locator('[type="submit"]').click();await expectSaved(page,db=>db.adCampaigns?.[0]?.productId==='product-2');
+ const state=inventory();state.products.push({id:'product-2',name:'กางเกง',variants:[{id:'variant-3',color:'ดำ',size:'L',type:'new',qty:5,cost:100,price:250}]});await boot(page,state);await nav(page,'stock');await page.locator('#workspace-inventory [data-product-ads="product-2"]').click();const form=page.locator('#ad-create-form');await expect(form.locator('[name="productId"]')).toHaveValue('product-2');await form.locator('[name="name"]').fill('แอดกางเกง');await form.locator('[name="targetQty"]').fill('5');await form.locator('[type="submit"]').click();await expectSaved(page,db=>db.adCampaigns?.[0]?.productId==='product-2');
  await page.evaluate(()=>{window.__testDB.products.find(p=>p.id==='product-2').name='กางเกงรุ่นใหม่';window.__testSubscribers.products(structuredClone(window.__testDB.products));});await expect(page.locator('.ad-card-header')).toContainText('กางเกงรุ่นใหม่');
 });

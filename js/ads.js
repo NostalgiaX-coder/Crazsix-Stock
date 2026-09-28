@@ -9,7 +9,7 @@ const dateValid = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.te
 const textValid = (v, max, required = false) => typeof v === 'string' && v.length <= max && (!required || v.trim().length > 0);
 export function validateAdWallet(entries, campaigns = []) {
   return Array.isArray(campaigns) && Array.isArray(entries) && entries.every(e => e && textValid(e.id,100,true) && !/[\s<>"'&]/.test(e.id) && cash(e.amount) && e.amount > 0 && dateValid(e.date) && textValid(e.note,500) &&
-    (e.campaignId == null ? e.budgetIncrease == null : campaigns.some(c=>c.id===e.campaignId) && e.budgetIncrease === e.amount)) &&
+    (e.campaignId == null ? e.budgetIncrease == null : campaigns.some(c=>c.id===e.campaignId) && (e.budgetIncrease == null || e.budgetIncrease === e.amount))) &&
     new Set(entries.map(e => e.id)).size === entries.length && cash(money(entries.reduce((sum,e) => sum + e.amount,0)));
 }
 export function adWalletMetrics(entries, transactions) {
@@ -43,19 +43,17 @@ export function validateAdCampaign(c) {
     (c.productIds == null || (Array.isArray(c.productIds) && c.productIds.length > 0 && c.productIds[0] === c.productId && new Set(c.productIds).size === c.productIds.length && c.productIds.every(id => textValid(id, 100, true)))) &&
     textValid(c.name, 120, true) && textValid(c.channel, 80, true) && Object.hasOwn(adStatuses, c.status) &&
     dateValid(c.startDate) && (c.runMode == null || ['dated', 'until_budget'].includes(c.runMode)) &&
-    (campaignUntilBudget(c) ? c.endDate === '' : dateValid(c.endDate) && c.endDate >= c.startDate) && cash(c.budget) &&
+    (campaignUntilBudget(c) ? c.endDate === '' : dateValid(c.endDate) && c.endDate >= c.startDate) && (c.budget == null || cash(c.budget)) &&
     (c.dailyBudget == null || (cash(c.dailyBudget) && c.dailyBudget > 0)) &&
     Number.isSafeInteger(c.targetQty) && c.targetQty > 0 && c.targetQty <= 1e9 &&
     Number.isFinite(c.reservePercent) && c.reservePercent >= 0 && c.reservePercent <= 100 &&
     textValid(c.note, 2000) && textValid(c.url, 2000) && (!c.url || Boolean(safeAdUrl(c.url)));
 }
-export function campaignPhase(c, today, transactions = []) {
+export function campaignPhase(c, today, transactions = [], wallet = []) {
   if (c.status !== 'active') return c.status;
   if (today < c.startDate) return 'scheduled';
-  if (campaignUntilBudget(c)) {
-    const spent = money(transactions.filter(tx => tx.adCampaignId === c.id && isAdSpend(tx)).reduce((sum, tx) => sum + tx.amount, 0));
-    if (spent >= c.budget) return 'exhausted';
-  } else if (today > c.endDate) return 'ended';
+  if (!campaignUntilBudget(c) && today > c.endDate) return 'ended';
+  if (adWalletMetrics(wallet, transactions).balance <= 0) return 'exhausted';
   return 'active';
 }
 const daysBetween = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 86400000) + 1;
@@ -72,9 +70,7 @@ export function adMetrics(c, transactions, today) {
   const days = campaignUntilBudget(c) ? null : daysBetween(c.startDate, c.endDate), daysLeft = days == null ? null : Math.max(0, daysBetween(today < c.startDate ? c.startDate : today, c.endDate));
   return { sales, expenses, spend, revenue, qty, grossProfit, net, cashNet, reserve, days, daysLeft,
     spentToday: sum(expenses.filter(tx => tx.date === today), 'amount'),
-    remaining: money(c.budget - spend), plannedPerUnit: c.budget / c.targetQty,
-    actualPerUnit: qty ? spend / qty : null, daily: days == null ? null : c.budget / days,
-    estimatedDays: c.dailyBudget > 0 ? Math.max(0, money(c.budget - spend)) / c.dailyBudget : null,
+    actualPerUnit: qty ? spend / qty : null,
     roas: spend ? revenue / spend : null, reservePerUnit: qty ? reserve / qty : 0,
   };
 }
@@ -86,8 +82,7 @@ export function productAdMetrics(product, campaigns, transactions, today) {
   const sales = transactions.filter(tx => isAdSale(tx) && saleMatchesProduct(tx, product));
   const spend = money(linked.reduce((sum, c) => sum + transactions.filter(tx => isAdSpend(tx) && tx.adCampaignId === c.id).reduce((total, tx) => total + (adSpendAllocations(tx, c).find(a => a.productId === product.id)?.amount || 0), 0), 0));
   const profit = money(sales.reduce((s, tx) => s + tx.profit, 0));
-  const plannedPerUnit = linked.filter(c => ['active', 'scheduled'].includes(campaignPhase(c, today, transactions))).reduce((s, c) => s + c.budget / c.targetQty, 0);
-  return { linked, spend, profit, net: money(profit - spend), plannedPerUnit };
+  return { linked, spend, profit, net: money(profit - spend) };
 }
 export function validateAdsBackup(campaigns, transactions, products) {
   if (!Array.isArray(campaigns) || !campaigns.every(validateAdCampaign) || new Set(campaigns.map(c => c.id)).size !== campaigns.length || campaigns.some(c => campaignProductIds(c).some(id => !products.some(p => p.id === id)))) return false;
@@ -115,8 +110,7 @@ export function validateAdsBackup(campaigns, transactions, products) {
 // Automatic entries are estimates from completed Bangkok calendar days, not platform receipts.
 const autoSnapshot = (c, wallet, date) => ({date, startDate:c.startDate, endDate:c.endDate,
   runMode:c.runMode || 'dated', status:c.status, dailyBudget:c.dailyBudget || 0,
-  enabled:c.autoDeduct !== false, productIds:campaignProductIds(c),
-  baseBudget:money(c.budget-wallet.filter(e=>e.campaignId===c.id).reduce((sum,e)=>sum+e.amount,0))});
+  enabled:c.autoDeduct !== false, productIds:campaignProductIds(c)});
 function ensureAutoHistory(c, wallet, today) {
   if (!c.autoHistory && c.dailyBudget > 0) c.autoHistory=[autoSnapshot(c,wallet,c.startDate < today ? c.startDate : today)];
 }
@@ -126,7 +120,7 @@ function validAutoHistory(c) {
       (!i || h.date>c.autoHistory[i-1].date) && dateValid(h.startDate) && ['dated','until_budget'].includes(h.runMode) &&
       (h.runMode==='until_budget' ? h.endDate==='' : dateValid(h.endDate) && h.endDate>=h.startDate) &&
       Object.hasOwn(adStatuses,h.status) && cash(h.dailyBudget) && typeof h.enabled==='boolean' &&
-      Number.isFinite(h.baseBudget) && cash(Math.abs(h.baseBudget)) && Array.isArray(h.productIds) && h.productIds.length>0 &&
+      (h.baseBudget == null || (Number.isFinite(h.baseBudget) && cash(Math.abs(h.baseBudget)))) && Array.isArray(h.productIds) && h.productIds.length>0 &&
       new Set(h.productIds).size===h.productIds.length && h.productIds.every(id=>campaignHasProduct(c,id)))));
 }
 export function reconcileAutomaticAds(state, today) {
@@ -144,30 +138,26 @@ export function reconcileAutomaticAds(state, today) {
     const start=first>fundedFrom ? first : fundedFrom;
     // Bound imported dates before building a daily ledger.
     if ((Date.parse(today)-Date.parse(start))/86400000>36600) throw new Error('ช่วงคำนวณค่าแอดยาวเกิน 100 ปี กรุณาตรวจวันที่');
-    const deposits=new Map(), payments=new Map(), manualDays=new Set(), topups=new Map();
+    const deposits=new Map(), payments=new Map(), manualDays=new Set();
     const add=(map,key,value)=>map.set(key,money((map.get(key)||0)+value));
-    wallet.forEach(e=>{add(deposits,e.date,e.amount);if(e.campaignId)add(topups,e.campaignId+'|'+e.date,e.amount);});
+    wallet.forEach(e=>add(deposits,e.date,e.amount));
     actual.filter(isAdSpend).forEach(tx=>{if(tx.adWalletFunded)add(payments,tx.date,tx.amount);manualDays.add(tx.adCampaignId+'|'+tx.date);});
     let credit=money(wallet.filter(e=>e.date<start).reduce((s,e)=>s+e.amount,0)-actual.filter(tx=>isAdSpend(tx)&&tx.adWalletFunded&&tx.date<start).reduce((s,tx)=>s+tx.amount,0));
-    const spent=new Map(), funded=new Map(), expenses=new Map();
-    actual.filter(isAdSpend).forEach(tx=>{if(tx.date<start)add(spent,tx.adCampaignId,tx.amount);else add(expenses,tx.adCampaignId+'|'+tx.date,tx.amount);});
-    wallet.filter(e=>e.campaignId&&e.date<start).forEach(e=>add(funded,e.campaignId,e.amount));
     for(let timestamp=Date.parse(start);timestamp<Date.parse(today);timestamp+=86400000) {
       const date=new Date(timestamp).toISOString().slice(0,10);
       credit=money(credit+(deposits.get(date)||0)-(payments.get(date)||0));
       for(const c of candidates) {
         const key=c.id+'|'+date;
-        add(funded,c.id,topups.get(key)||0);add(spent,c.id,expenses.get(key)||0);
         const h=c.autoHistory.filter(h=>h.date<=date).at(-1);
         if (!h || !h.enabled || h.status!=='active' || !h.dailyBudget || date<h.startDate || (h.runMode==='dated'&&date>h.endDate) || manualDays.has(key)) continue;
-        const amount=money(Math.max(0,Math.min(h.dailyBudget,credit,h.baseBudget+(funded.get(c.id)||0)-(spent.get(c.id)||0))));
+        const amount=money(Math.max(0,Math.min(h.dailyBudget,credit)));
         if (!amount) continue;
         const id='ad-auto-'+c.id+'-'+date;
         if(actualIds.has(id)) throw new Error('รหัสรายการค่าแอดอัตโนมัติซ้ำ กรุณาตรวจประวัติ');
         const previous=previousAuto.get(id);
         generated.push({id,adCampaignId:c.id,adAutomatic:true,adWalletFunded:true,type:'expense',category:'ค่าโฆษณาสินค้า',amount,date,
           adAllocations:previous?.amount===amount && previous.adAllocations ? previous.adAllocations : allocateAdSpend(amount,h.productIds),desc:`${c.name} · หักอัตโนมัติตามงบต่อวัน (ประมาณการ)`});
-        credit=money(credit-amount);add(spent,c.id,amount);
+        credit=money(credit-amount);
       }
     }
   }
@@ -186,9 +176,7 @@ export function applyAdAction(state, action, id, today) {
       if (action.campaignId != null) {
         const c = campaigns.find(c=>c.id===action.campaignId);
         if (!c || JSON.stringify(c)!==action.expected) throw new Error('แคมเปญเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุด');
-        if (!cash(action.amount) || action.amount<=0 || !cash(money(c.budget+action.amount))) throw new Error('ยอดเติมเงินต้องมากกว่า 0 และมีทศนิยมไม่เกิน 2 ตำแหน่ง');
-        c.budget=money(c.budget+action.amount);
-        entry.campaignId=c.id; entry.budgetIncrease=action.amount;
+        entry.campaignId=c.id;
       }
       wallet.unshift(entry);
     } else {
@@ -197,8 +185,6 @@ export function applyAdAction(state, action, id, today) {
       if (entry.campaignId) {
         const c=campaigns.find(c=>c.id===entry.campaignId);
         if (!c || JSON.stringify(c)!==action.expected) throw new Error('แคมเปญเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุด');
-        if (c.budget<entry.budgetIncrease) throw new Error('งบแคมเปญถูกปรับต่ำกว่ายอดเติมนี้แล้ว กรุณาตรวจงบก่อนลบรายการ');
-        c.budget=money(c.budget-entry.budgetIncrease);
       }
       wallet = wallet.filter(e => e.id !== action.entryId);
     }
@@ -213,6 +199,7 @@ export function applyAdAction(state, action, id, today) {
   if (['create', 'edit'].includes(action.type)) {
     const next = { ...action.values, id: campaign?.id || id };
     delete next.autoHistory;
+    delete next.budget;
     if(campaign) {
       ensureAutoHistory(campaign,wallet,today);
       if(campaign.autoHistory) next.autoHistory=[...campaign.autoHistory.filter(h=>h.date<today),autoSnapshot(next,wallet,today)];

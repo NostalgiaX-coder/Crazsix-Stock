@@ -1,4 +1,4 @@
-import { adMetrics, campaignUntilBudget } from "./ads.js";
+import { adWalletMetrics, campaignUntilBudget } from "./ads.js";
 import { pendingDeliveries } from "./shipments.js";
 // Shared, side-effect-free helpers for reports and store follow-ups.
 export function toCsv(rows) {
@@ -24,7 +24,7 @@ export function cashSummary(transactions, from = '', to = '') {
   };
 }
 
-export function followUpItems({ products, pendingOrders, preorders, transactions, adCampaigns = [], shipments = [] }, today, threshold = 1) {
+export function followUpItems({ products, pendingOrders, preorders, transactions, adCampaigns = [], adWallet = [], shipments = [] }, today, threshold = 1) {
   const rows = [];
   for (const {sale,remaining} of pendingDeliveries(transactions,shipments)) rows.push({
     kind:'shipment', id:sale.id, priority:1, title:sale.desc || 'ขายแล้วรอส่ง',
@@ -56,12 +56,12 @@ export function followUpItems({ products, pendingOrders, preorders, transactions
     date: sale.dueDate || '', target: 'installment',
   });
   for (const campaign of adCampaigns.filter(c => ['active', 'paused'].includes(c.status))) {
-    const m = adMetrics(campaign, transactions, today);
+    const credit = adWalletMetrics(adWallet, transactions).balance;
     const ended = !campaignUntilBudget(campaign) && campaign.endDate < today;
-    if (m.remaining <= 0 || ended) rows.push({
-      kind: 'ads', id: campaign.id, priority: m.remaining < 0 ? 0 : 1,
+    if (ended || (campaign.status === 'active' && campaign.startDate <= today && credit <= 0)) rows.push({
+      kind: 'ads', id: campaign.id, priority: credit < 0 ? 0 : 1,
       title: campaign.name,
-      detail: `${ended ? 'ครบกำหนดแคมเปญ · ' : ''}${m.remaining < 0 ? 'เกินงบ' : m.remaining === 0 ? 'ใช้งบครบแล้ว' : 'งบคงเหลือ'} ฿${Math.abs(m.remaining).toLocaleString('th-TH', { maximumFractionDigits: 2 })}`,
+      detail: `${ended ? 'ครบกำหนดแคมเปญ · ' : ''}${credit < 0 ? 'เครดิตติดลบ' : credit === 0 ? 'เครดิตหมดแล้ว' : 'เครดิตกลางคงเหลือ'} ฿${Math.abs(credit).toLocaleString('th-TH', { maximumFractionDigits: 2 })}`,
       date: campaign.endDate, target: 'ads',
     });
   }

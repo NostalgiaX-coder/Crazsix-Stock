@@ -387,7 +387,7 @@ const savePending = () => saveData("pendingOrders");
 function exportData() {
   const payload = {
     exportedAt: new Date().toISOString(),
-    version: 12,
+    version: 13,
     products,
     transactions,
     pendingOrders,
@@ -1598,7 +1598,7 @@ const tabMeta = {
     "box",
     "จัดการสินค้า เติมสต็อก และรับสินค้าเข้า",
   ],
-  ads: ["ยิงแอดและต้นทุนโฆษณา", "ยิงแอด", "chart", "ผูกสินค้า วางงบ ติดตามกำไร และเก็บเงินยิงแอดต่อ"],
+  ads: ["ยิงแอดและต้นทุนโฆษณา", "ยิงแอด", "chart", "ผูกสินค้า เติมเครดิต ติดตามกำไร และเก็บเงินยิงแอดต่อ"],
   preorder: ["Pre-order ลูกค้า", "Pre-order ลูกค้า", "clock", "รับจอง ติดตามมัดจำ และส่งมอบสินค้าที่ลูกค้าพรีกับร้าน"],
   sell: ["ขายสินค้า", "ขายสินค้า", "bag", "พร้อมสำหรับออเดอร์ถัดไปของคุณ"],
   shipments: ["จัดส่งสินค้า", "รอส่ง", "box", "รวมสินค้าที่ขายแล้ว เลือกหลายรายการ และบันทึกพัสดุที่ส่ง"],
@@ -3509,7 +3509,7 @@ function wireSellTab() {
     card.querySelector(".sale-total-value").textContent =
       `${fmtMoney(total)} / ${fmtMoney(profit)}`;
     const campaign = adCampaigns.find(c => c.id === card.querySelector(".sell-ad-campaign").value);
-    card.querySelector(".sell-ad-preview").textContent = campaign ? `งบแอดตามเป้า ${fmtMoney(campaign.budget / campaign.targetQty)}/ชิ้น · กำไรคาดการณ์หลังเผื่องบแอด ${fmtMoney(profit - qty * campaign.budget / campaign.targetQty)} · กำไรจริงและเงินแนะนำเก็บดูในเมนูยิงแอดหลังบันทึกค่าแอด` : "กำไรประมาณด้านล่างยังไม่หักค่าแอด เลือกแคมเปญเพื่อผูกยอดขาย";
+    card.querySelector(".sell-ad-preview").textContent = campaign ? "ผูกยอดขายกับแคมเปญนี้ ค่าแอดหักจากเครดิต Ads Manager ดูต้นทุนและกำไรหลังแอดในเมนูยิงแอด" : "กำไรประมาณด้านล่างยังไม่หักค่าแอด เลือกแคมเปญเพื่อผูกยอดขาย";
   }
   function syncSaleCard(card) {
     const color = card.querySelector(".sell-color-select").value;
@@ -3531,7 +3531,7 @@ function wireSellTab() {
     card.querySelector(".sell-price").innerHTML =
       `${fmtMoney(variant.price)} <span class="sell-cost-note">ต้นทุน ${fmtMoney(variant.cost)}</span>`;
     const adSelect = card.querySelector(".sell-ad-campaign"), previousCampaign = adSelect.value;
-    adSelect.innerHTML = '<option value="">ไม่ระบุแคมเปญ</option>' + adCampaigns.filter(c => campaignHasProduct(c, found.product.id) && c.status !== "cancelled").map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)} · ${c.startDate}–${campaignUntilBudget(c) ? 'จนงบหมด' : c.endDate}</option>`).join("");
+    adSelect.innerHTML = '<option value="">ไม่ระบุแคมเปญ</option>' + adCampaigns.filter(c => campaignHasProduct(c, found.product.id) && c.status !== "cancelled").map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)} · ${c.startDate}–${campaignUntilBudget(c) ? 'จนเครดิตหมด' : c.endDate}</option>`).join("");
     if ([...adSelect.options].some(o => o.value === previousCampaign)) adSelect.value = previousCampaign;
     const qty = card.querySelector(".sell-qty");
     qty.max = variant.qty;
@@ -4356,7 +4356,7 @@ let reportTo = "";
 const taskKinds = { shipment: "จัดส่ง / คืนเงิน", ads: "แคมเปญยิงแอด", stock: "สต็อกใกล้หมด", supplier: "ร้านสั่งรอรับ", preorder: "Pre-order ลูกค้า", installment: "ผ่อนค้างชำระ" };
 function renderTasksTab() {
   const items = followUpItems(storeValues(), todayStr(), LOW_STOCK_THRESHOLD);
-  return `<section class="stats tasks-stats">${metric("งานทั้งหมด", items.length, "อัปเดตจากรายการปัจจุบัน", "check")}${metric("ควรจัดการก่อน", items.filter(item => item.priority === 0).length, "สินค้าหมด เกินวันนัด หรือแอดเกินงบ", "clock", "expense-stat")}</section>
+  return `<section class="stats tasks-stats">${metric("งานทั้งหมด", items.length, "อัปเดตจากรายการปัจจุบัน", "check")}${metric("ควรจัดการก่อน", items.filter(item => item.priority === 0).length, "สินค้าหมด เกินวันนัด หรือเครดิตแอดติดลบ", "clock", "expense-stat")}</section>
     <div class="panel"><h2>งานที่ต้องติดตาม</h2><p class="hint">สินค้ารอรับคือร้านสั่งมาขายเอง ส่วน pre-order คือรายการที่ลูกค้าสั่งกับร้าน วันที่ในรายการรอรับเป็นวันสั่งซื้อ ส่วนรายการลูกค้าเป็นวันครบกำหนด</p>
     <div class="task-filters"><div class="field"><label>ค้นหางาน</label><input id="task-search" type="search" value="${escapeHtml(taskSearch)}" placeholder="สินค้า ลูกค้า หรือหมายเหตุ"></div><div class="field"><label>ประเภทงาน</label><select id="task-filter">${Object.entries({ all: "ทุกประเภท", urgent: "ควรจัดการก่อน", ...taskKinds }).map(([key, label]) => `<option value="${key}" ${taskFilter === key ? "selected" : ""}>${label}</option>`).join("")}</select></div></div><p class="hint" id="task-count" role="status"></p>
     <div class="task-list">${items.map(item => `<article class="task-card" data-task-kind="${item.kind}" data-task-priority="${item.priority}"><div><span class="tag ${item.priority === 0 ? "expense" : "preorder"}">${taskKinds[item.kind]}</span><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.detail)}</p>${item.date ? `<p class="hint">${item.kind === "supplier" ? "สั่งเมื่อ" : item.kind === "shipment" ? "วันที่รายการ" : "ครบกำหนด"} ${escapeHtml(item.date)}</p>` : ""}</div><button class="btn btn-ghost" data-task-target="${item.target}" data-task-id="${escapeHtml(item.id)}" data-task-workspace="${item.workspace || ""}">เปิดรายการ</button></article>`).join("")}</div><div class="empty" id="task-empty" hidden>ไม่มีงานที่ตรงกับตัวกรอง</div></div>`;
@@ -4521,7 +4521,7 @@ function renderProductAds(productId) {
   const product = products.find(p => p.id === productId);
   if (!product) return "";
   const m = productAdMetrics(product, adCampaigns, transactions, todayStr());
-  return `<section class="product-ad-detail"><h3>ค่าแอดของสินค้า (รวมทุกสี/ไซส์)</h3><p>ผูก ${m.linked.length} แคมเปญ · ค่าแอดตามบันทึก (รวมอัตโนมัติ) ${fmtMoney(m.spend)}</p><p><strong>กำไรสินค้าหลังหักแอด ${fmtMoney(m.net)}</strong></p><p class="hint">ยอดขายทั้งหมดของสินค้านี้ ก่อนแอด ${fmtMoney(m.profit)} − ค่าแอด ${fmtMoney(m.spend)} · งบต่อชิ้นสำหรับวางราคา ${fmtMoney(m.plannedPerUnit)} จากแคมเปญที่เปิดใช้งานหรือยังไม่เริ่ม ต้นทุนซื้อในสต็อกยังคงเดิม</p><button class="btn btn-ghost" data-product-ads="${escapeHtml(product.id)}">จัดการแอดของสินค้านี้</button></section>`;
+  return `<section class="product-ad-detail"><h3>ค่าแอดของสินค้า (รวมทุกสี/ไซส์)</h3><p>ผูก ${m.linked.length} แคมเปญ · ค่าแอดตามบันทึก (รวมอัตโนมัติ) ${fmtMoney(m.spend)}</p><p><strong>กำไรสินค้าหลังหักแอด ${fmtMoney(m.net)}</strong></p><p class="hint">ยอดขายทั้งหมดของสินค้านี้ ก่อนแอด ${fmtMoney(m.profit)} − ค่าแอด ${fmtMoney(m.spend)} ต้นทุนซื้อในสต็อกยังคงเดิม</p><button class="btn btn-ghost" data-product-ads="${escapeHtml(product.id)}">จัดการแอดของสินค้านี้</button></section>`;
 }
 function wireProductAds() {
   document.querySelectorAll('[data-product-ads]').forEach(button => button.onclick = () => {

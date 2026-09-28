@@ -6,7 +6,7 @@ function seed() {
 }
 const legacy = () => ({id:'ad-1',productId:'product-1',name:'แอดเดิม',channel:'Facebook',status:'active',startDate:today(),endDate:today(),budget:500,targetQty:10,reservePercent:20,url:'',note:''});
 async function create(page) {
- await nav(page,'ads');const f=page.locator('#ad-create-form');await f.locator('[name="name"]').fill('แอดรวมหลายสินค้า');await f.locator('[name="productId"]').selectOption('product-1');await f.locator('[name="extraProductId"][value="product-2"]').check();await f.locator('[name="budget"]').fill('100');await f.locator('[name="targetQty"]').fill('10');await f.locator('[type="submit"]').click();await expectSaved(page,db=>db.adCampaigns.length===1);
+ await nav(page,'ads');const f=page.locator('#ad-create-form');await f.locator('[name="name"]').fill('แอดรวมหลายสินค้า');await f.locator('[name="productId"]').selectOption('product-1');await f.locator('[name="extraProductId"][value="product-2"]').check();await f.locator('[name="targetQty"]').fill('10');await f.locator('[type="submit"]').click();await expectSaved(page,db=>db.adCampaigns.length===1);
 }
 async function spend(page,amount) {
  await page.locator('.ad-spend-details > summary').click();await page.locator('.ad-spend-form [name="amount"]').fill(amount);await page.locator('.ad-spend-form button').click();await expectSaved(page,db=>db.transactions.some(t=>t.type==='expense'&&t.amount===Number(amount)));
@@ -15,12 +15,12 @@ async function metrics(page) {
  return page.evaluate(async()=>{const {productAdMetrics,adMetrics}=await import('/js/ads.js');const s=window.__testDB;return {products:s.products.map(p=>productAdMetrics(p,s.adCampaigns,s.transactions,new Date().toISOString().slice(0,10))),campaign:adMetrics(s.adCampaigns[0],s.transactions,new Date().toISOString().slice(0,10))};});
 }
 
-test('an ongoing campaign has no end date, tracks budget exhaustion and resumes after increasing budget',async({page})=>{
- const errors=await boot(page,seed());await create(page);let db=await snapshot(page);expect(db.adCampaigns[0]).toMatchObject({runMode:'until_budget',endDate:'',productIds:['product-1','product-2']});
+test('an ongoing campaign has no end date, tracks shared credit exhaustion and resumes after topup',async({page})=>{
+ const initial=seed();initial.adWallet=[{id:'initial',amount:100,date:today(),note:''}];const errors=await boot(page,initial);await create(page);let db=await snapshot(page);expect(db.adCampaigns[0]).toMatchObject({runMode:'until_budget',endDate:'',productIds:['product-1','product-2']});
  await expect(page.locator('.ad-card-header')).toContainText('ไม่กำหนดวันสิ้นสุด');await expect(page.locator('.ad-card-header')).not.toContainText('/วัน');
  await spend(page,'100');await expect(page.locator('[data-ad-phase="exhausted"]')).toBeVisible();await expect(page.locator('.ad-warning')).toContainText('ไม่ได้สั่งหยุดโฆษณาให้อัตโนมัติ');
- await nav(page,'tasks');await page.locator('#task-filter').selectOption('ads');await expect(page.locator('[data-task-kind="ads"]')).toContainText('ใช้งบครบแล้ว');await expect(page.locator('[data-task-kind="ads"]')).not.toContainText('ครบกำหนดแคมเปญ');
- await nav(page,'ads');await page.locator('.ad-edit-details > summary').click();await page.locator('.ad-edit-form [name="budget"]').fill('200');await page.locator('.ad-edit-form button').click();await expect(page.locator('[data-ad-phase="active"]')).toBeVisible();expect(errors).toEqual([]);
+ await nav(page,'tasks');await page.locator('#task-filter').selectOption('ads');await expect(page.locator('[data-task-kind="ads"]')).toContainText('เครดิตหมดแล้ว');await expect(page.locator('[data-task-kind="ads"]')).not.toContainText('ครบกำหนดแคมเปญ');
+ await nav(page,'ads');await page.locator('.ad-wallet-details > summary').click();await page.locator('#ad-topup-form [name="amount"]').fill('200');await page.locator('#ad-topup-form button').click();await expect(page.locator('[data-ad-phase="active"]')).toBeVisible();expect(errors).toEqual([]);
 });
 
 test('multi-product costs split to exact cents and sales remain specific to each product',async({page})=>{
@@ -39,7 +39,7 @@ test('adding a product to a legacy campaign preserves historical allocations and
 });
 
 test('switching run modes requires a valid end date only for dated campaigns',async({page})=>{
- await boot(page,seed());await nav(page,'ads');const f=page.locator('#ad-create-form');await expect(f.locator('[name="endDate"]')).toBeDisabled();await expect(f.locator('.ad-end-field')).toBeHidden();await f.locator('[name="runMode"]').selectOption('dated');await expect(f.locator('[name="endDate"]')).toBeEnabled();await f.locator('[name="name"]').fill('แอดมีวันจบ');await f.locator('[name="productId"]').selectOption('product-1');await f.locator('[name="budget"]').fill('100');await f.locator('[name="targetQty"]').fill('10');await f.locator('[name="startDate"]').fill('2030-02-02');await f.locator('[name="endDate"]').fill('2030-02-01');await f.locator('button').click();await expect(page.locator('#modal-message')).toContainText('กรุณาตรวจ');await page.locator('#modal-ok-btn').click();await f.locator('[name="runMode"]').selectOption('until_budget');await f.locator('button').click();await expectSaved(page,db=>db.adCampaigns.length===1);await expect(page.locator('[data-ad-phase="scheduled"]')).toBeVisible();
+ await boot(page,seed());await nav(page,'ads');const f=page.locator('#ad-create-form');await expect(f.locator('[name="endDate"]')).toBeDisabled();await expect(f.locator('.ad-end-field')).toBeHidden();await f.locator('[name="runMode"]').selectOption('dated');await expect(f.locator('[name="endDate"]')).toBeEnabled();await f.locator('[name="name"]').fill('แอดมีวันจบ');await f.locator('[name="productId"]').selectOption('product-1');await f.locator('[name="targetQty"]').fill('10');await f.locator('[name="startDate"]').fill('2030-02-02');await f.locator('[name="endDate"]').fill('2030-02-01');await f.locator('button').click();await expect(page.locator('#modal-message')).toContainText('กรุณาตรวจ');await page.locator('#modal-ok-btn').click();await f.locator('[name="runMode"]').selectOption('until_budget');await f.locator('button').click();await expectSaved(page,db=>db.adCampaigns.length===1);await expect(page.locator('[data-ad-phase="scheduled"]')).toBeVisible();
 });
 
 test('backup validates multi-product memberships and exact expense allocations',async({page})=>{

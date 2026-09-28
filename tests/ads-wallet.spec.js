@@ -32,20 +32,20 @@ test('topups can precede products and new campaigns retain a daily budget',async
  const form=await topup(page,'250');await form.locator('button').click();await expectSaved(page,s=>s.adWallet.length===1);
  await page.evaluate(products=>{window.__testDB.products=products;window.__testSubscribers.products(structuredClone(products));},inventory().products);
  await nav(page,'home');await nav(page,'ads');const create=page.locator('#ad-create-form');
- await create.locator('[name="name"]').fill('แอดต่อเนื่อง');await create.locator('[name="productId"]').selectOption('product-1');await create.locator('[name="budget"]').fill('500');await create.locator('[name="dailyBudget"]').fill('50');await create.locator('[name="targetQty"]').fill('10');await create.locator('button').click();
+ await create.locator('[name="name"]').fill('แอดต่อเนื่อง');await create.locator('[name="productId"]').selectOption('product-1');await create.locator('[name="dailyBudget"]').fill('50');await create.locator('[name="targetQty"]').fill('10');await create.locator('button').click();
  await expectSaved(page,s=>s.adCampaigns[0]?.dailyBudget===50);expect((await snapshot(page)).adWallet[0].amount).toBe(250);expect((await snapshot(page)).transactions).toHaveLength(0);
 });
 
 test('daily budgets estimate duration, persist edits and remain optional for old campaigns',async({page})=>{
- const s=seed();delete s.adCampaigns[0].dailyBudget;await boot(page,s);await nav(page,'ads');
- await expect(page.locator('.ad-metrics').last()).toContainText('ระบุงบต่อวันก่อน');
+ const s=seed();s.adWallet=[{id:'credit',amount:1000,date:today(),note:''}];delete s.adCampaigns[0].dailyBudget;await boot(page,s);await nav(page,'ads');
+ await expect(page.locator('[data-wallet-duration]')).toContainText('ยังไม่มีแคมเปญที่หักอัตโนมัติรายวัน');
  await page.locator('.ad-edit-details > summary').click();const form=page.locator('.ad-edit-form');
- await form.locator('[name="dailyBudget"]').fill('125');await expect(form.locator('.ad-plan-preview')).toContainText('8 วัน');
+ await form.locator('[name="dailyBudget"]').fill('125');await expect(form.locator('.ad-plan-preview')).toContainText('วันละ ฿125');
  await form.locator('button').click();await expectSaved(page,s=>s.adCampaigns[0].dailyBudget===125);
  expect((await snapshot(page)).transactions).toHaveLength(0);
- await expect(page.locator('.ad-metrics').last()).toContainText('8 วัน');
- await spend(page,'250','direct');await expectSaved(page,s=>s.transactions.length===1);
- await expect(page.locator('.ad-metrics').last()).toContainText('6 วัน');
+ await expect(page.locator('[data-wallet-duration]')).toContainText('8 วัน');
+ await spend(page,'250','wallet');await expectSaved(page,s=>s.transactions.length===1);
+ await expect(page.locator('[data-wallet-duration]')).toContainText('6 วัน');
  await expect(page.locator('.ad-metrics').last()).toContainText('ค่าแอดใช้จริงวันนี้฿250');
  await page.locator('.ad-edit-details > summary').click();await form.locator('[name="dailyBudget"]').fill('');await form.locator('button').click();
  await expectSaved(page,s=>s.adCampaigns[0].dailyBudget===null);
@@ -97,7 +97,7 @@ test('wallet backup and CSV round trip; malformed wallet and funding flags are r
  const s=seed();s.adWallet=[{id:'topup-1',amount:200,date:today(),note:'=bad'}];
  s.transactions=[{id:'spend-1',adCampaignId:'ad-1',adWalletFunded:true,type:'expense',category:'ค่าโฆษณาสินค้า',date:today(),amount:50,desc:'ใช้จริง'}];
  await boot(page,s);await nav(page,'ads');expect(await download(page,'#ad-wallet-export')).toContain("'=bad");
- await page.locator('.data-tools summary').click();const backup=JSON.parse(await download(page,'#export-btn'));expect(backup.adWallet).toEqual(s.adWallet);expect(backup.version).toBe(12);
+ await page.locator('.data-tools summary').click();const backup=JSON.parse(await download(page,'#export-btn'));expect(backup.adWallet).toEqual(s.adWallet);expect(backup.version).toBe(13);
  const upload=data=>page.locator('#import-input').setInputFiles({name:'wallet.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(data))});
  await upload(backup);await page.locator('#modal-ok-btn').click();await expectSaved(page,s=>s.adWallet?.length===1);
  for(const mutate of [b=>b.adWallet[0].amount=-1,b=>b.adWallet.push({...b.adWallet[0]}),b=>b.adCampaigns[0].dailyBudget=0,b=>b.transactions[0].adWalletFunded='yes']) {
