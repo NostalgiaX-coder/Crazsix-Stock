@@ -1,6 +1,6 @@
 import { cancelledSaleFor, activeAccountingTransactions, deliveryLabels, pendingDeliveries, validateShipments, applyShipmentAction } from "./shipments.js";
 import { renderShipments, wireShipments } from "./shipments-ui.js";
-import { campaignProductIds, campaignHasProduct, campaignUntilBudget, productAdMetrics, validateAdsBackup, validateAdWallet, applyAdAction, isAdSpend } from "./ads.js";
+import { reconcileAutomaticAds, campaignProductIds, campaignHasProduct, campaignUntilBudget, productAdMetrics, validateAdsBackup, validateAdWallet, applyAdAction, isAdSpend } from "./ads.js";
 import { renderAds, wireAds } from "./ads-ui.js";
 import { parseMeasurement, measurementsOf, validMeasurements, measurementLabel, stockOptionKey, assertStockRows, assertShipping, stockAdjustment, validAdjustments, allocateCashCosts } from "./inventory-tools.js";
 import { toCsv, cashSummary, followUpItems } from "./store-tools.js";
@@ -299,6 +299,7 @@ async function loadStoreData() {
     confirmedStore = copyData(storeValues());
 
     loaded = true;
+    await syncAutomaticAds(false);
     subscribeToStoreChanges();
   } catch (e) {
     loadError = true;
@@ -386,7 +387,7 @@ const savePending = () => saveData("pendingOrders");
 function exportData() {
   const payload = {
     exportedAt: new Date().toISOString(),
-    version: 11,
+    version: 12,
     products,
     transactions,
     pendingOrders,
@@ -994,7 +995,7 @@ async function mergeDuplicateData() {
   pendingOrders = pendingOrders.map(order => order.productId ? { ...order, productId: productIdMap.get(order.productId) || order.productId } : order);
   adCampaigns = adCampaigns.map(c => {
     const productIds = [...new Set(campaignProductIds(c).map(id => productIdMap.get(id) || id))];
-    return {...c, productId: productIds[0], productIds};
+    return {...c, productId: productIds[0], productIds, ...(c.autoHistory ? {autoHistory:c.autoHistory.map(h=>({...h,productIds:[...new Set(h.productIds.map(id=>productIdMap.get(id)||id))]}))} : {})};
   });
   transactions.forEach(tx => {
     if (!tx.adAllocations) return;
@@ -1471,13 +1472,16 @@ async function addManualTx(data) {
 }
 
 function isManualTransaction(tx) {
-  return ["income", "expense"].includes(tx.type) && !tx.saleCancellationId && !tx.adCampaignId && !tx.productId && !tx.installmentId && !tx.preorderId && !tx.items && !tx.pendingIds && tx.profit == null &&
+  return ["income", "expense"].includes(tx.type) && !tx.shipmentId && !tx.saleCancellationId && !tx.adCampaignId && !tx.productId && !tx.installmentId && !tx.preorderId && !tx.items && !tx.pendingIds && tx.profit == null &&
     (tx.source === "manual" || !["ขายสินค้า", "ค่าส่งสินค้าเข้า", "สั่งซื้อสินค้า (รอของมาส่ง)", "ค่าส่ง", "ค่ากลาง"].includes(tx.category));
 }
 
 async function deleteTx(id) {
   const target = transactions.find((tx) => tx.id === id);
   if (!target) return;
+  if (target.shipmentId) {
+    showAlert("รายการนี้เป็นค่าส่งพัสดุ แก้ไขยอดหรือใส่ 0 ที่ประวัติการส่งสินค้าในเมนูรอส่ง เพื่อให้ค่าส่งและกำไรของทุกสินค้าตรงกัน"); return;
+  }
   if (cancelledSaleFor(target, transactions)) {
     const reviewed = JSON.stringify(transactions);
     if (!(await showConfirm("ลบรายการนี้ออกจากหน้ารายรับ–รายจ่าย? ระบบจะเก็บประวัติการยกเลิกการขายและคืนเงินไว้ในเมนูรอส่ง ไม่คืนสต็อกซ้ำและไม่เปลี่ยนยอดเงินรับ/จ่ายจริง"))) return;
@@ -4417,7 +4421,7 @@ function wireExportTools() {
   });
 }
 function renderRangeReport() {
-  return `<div class="panel"><h2>รายงานตามช่วงวันที่</h2><div class="task-filters"><div class="field"><label>ตั้งแต่วันที่</label><input id="report-from" type="date" value="${reportFrom}"></div><div class="field"><label>ถึงวันที่</label><input id="report-to" type="date" value="${reportTo}"></div><button class="btn btn-ghost" id="report-clear">ทุกช่วงเวลา</button><button class="btn btn-primary" id="report-export">ส่งออกช่วงนี้ CSV</button></div><p class="hint" id="report-range-error" role="status"></p><div id="report-range-summary" class="stats range-stats"></div><p class="hint">เงินสดสุทธิรวมเงินรับและเงินคืนของยอดขายยกเลิกตามวันที่รับ/จ่ายจริง แม้ลบออกจากหน้าบัญชีแล้ว ส่วนสรุปรายเดือนตัดยอดขายยกเลิกและเงินคืนที่เกี่ยวข้องออก กำไรจากการขายคิดเฉพาะยอดขายในช่วงนี้ หักต้นทุนสินค้า ค่าส่ง และค่ากลางแล้ว กำไรหลังแอดหักค่าแอดที่จ่ายในช่วงวันที่เลือกอีกครั้งหนึ่งจากกำไรขาย ยังไม่หักค่าใช้จ่ายทั่วไปของร้าน ตารางและกราฟด้านล่างแสดงกำไรก่อนค่าแอดและเป็นภาพรวมทุกช่วงเวลา</p></div>`;
+  return `<div class="panel"><h2>รายงานตามช่วงวันที่</h2><div class="task-filters"><div class="field"><label>ตั้งแต่วันที่</label><input id="report-from" type="date" value="${reportFrom}"></div><div class="field"><label>ถึงวันที่</label><input id="report-to" type="date" value="${reportTo}"></div><button class="btn btn-ghost" id="report-clear">ทุกช่วงเวลา</button><button class="btn btn-primary" id="report-export">ส่งออกช่วงนี้ CSV</button></div><p class="hint" id="report-range-error" role="status"></p><div id="report-range-summary" class="stats range-stats"></div><p class="hint">ค่าแอดอัตโนมัติในรายงานเป็นประมาณการตามงบต่อวัน จนกว่าจะบันทึกยอดจริงแทน เงินสดสุทธิรวมเงินรับและเงินคืนของยอดขายยกเลิกตามวันที่รับ/จ่ายจริง แม้ลบออกจากหน้าบัญชีแล้ว ส่วนสรุปรายเดือนตัดยอดขายยกเลิกและเงินคืนที่เกี่ยวข้องออก กำไรจากการขายคิดเฉพาะยอดขายในช่วงนี้ หักต้นทุนสินค้า ค่าส่ง และค่ากลางแล้ว กำไรหลังแอดหักค่าแอดที่จ่ายในช่วงวันที่เลือกอีกครั้งหนึ่งจากกำไรขาย ยังไม่หักค่าใช้จ่ายทั่วไปของร้าน ตารางและกราฟด้านล่างแสดงกำไรก่อนค่าแอดและเป็นภาพรวมทุกช่วงเวลา</p></div>`;
 }
 function wireRangeReport() {
   const from = document.getElementById("report-from"), to = document.getElementById("report-to");
@@ -4482,6 +4486,22 @@ function wireStocktake() {
 
 
 // ---------- Advertising workspace ----------
+async function syncAutomaticAds(refresh = true) {
+  if (!loaded || savingStores.size || (refresh && (formDirty || document.querySelector('.modal-overlay.show')))) return;
+  try {
+    const next = reconcileAutomaticAds(storeValues(), todayStr());
+    if (JSON.stringify(next.adCampaigns) === JSON.stringify(adCampaigns) && JSON.stringify(next.transactions) === JSON.stringify(transactions)) return;
+    adCampaigns = next.adCampaigns;
+    transactions = next.transactions;
+    await saveData("adCampaigns", "transactions", "adWallet", "products");
+    if (refresh) render();
+  } catch (error) {
+    if (!error.storageReported) showAlert(error.message);
+  }
+}
+setInterval(() => syncAutomaticAds(), 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) syncAutomaticAds(); });
+
 function wireAdsTab() {
   wireAds(copyData(storeValues()), {
     today: todayStr(), fmt: fmtMoney, confirm: showConfirm, alert: showAlert, csv: downloadCsv,
@@ -4501,7 +4521,7 @@ function renderProductAds(productId) {
   const product = products.find(p => p.id === productId);
   if (!product) return "";
   const m = productAdMetrics(product, adCampaigns, transactions, todayStr());
-  return `<section class="product-ad-detail"><h3>ค่าแอดของสินค้า (รวมทุกสี/ไซส์)</h3><p>ผูก ${m.linked.length} แคมเปญ · ค่าแอดจ่ายจริง ${fmtMoney(m.spend)}</p><p><strong>กำไรสินค้าหลังหักแอด ${fmtMoney(m.net)}</strong></p><p class="hint">ยอดขายทั้งหมดของสินค้านี้ ก่อนแอด ${fmtMoney(m.profit)} − ค่าแอด ${fmtMoney(m.spend)} · งบต่อชิ้นสำหรับวางราคา ${fmtMoney(m.plannedPerUnit)} จากแคมเปญที่เปิดใช้งานหรือยังไม่เริ่ม ต้นทุนซื้อในสต็อกยังคงเดิม</p><button class="btn btn-ghost" data-product-ads="${escapeHtml(product.id)}">จัดการแอดของสินค้านี้</button></section>`;
+  return `<section class="product-ad-detail"><h3>ค่าแอดของสินค้า (รวมทุกสี/ไซส์)</h3><p>ผูก ${m.linked.length} แคมเปญ · ค่าแอดตามบันทึก (รวมอัตโนมัติ) ${fmtMoney(m.spend)}</p><p><strong>กำไรสินค้าหลังหักแอด ${fmtMoney(m.net)}</strong></p><p class="hint">ยอดขายทั้งหมดของสินค้านี้ ก่อนแอด ${fmtMoney(m.profit)} − ค่าแอด ${fmtMoney(m.spend)} · งบต่อชิ้นสำหรับวางราคา ${fmtMoney(m.plannedPerUnit)} จากแคมเปญที่เปิดใช้งานหรือยังไม่เริ่ม ต้นทุนซื้อในสต็อกยังคงเดิม</p><button class="btn btn-ghost" data-product-ads="${escapeHtml(product.id)}">จัดการแอดของสินค้านี้</button></section>`;
 }
 function wireProductAds() {
   document.querySelectorAll('[data-product-ads]').forEach(button => button.onclick = () => {
@@ -4551,6 +4571,6 @@ function wireShipmentsTab() {
     if (action.type === "cancelSale") products = next.products;
     await saveData("transactions","shipments", ...(action.type === "cancelSale" ? ["products"] : []));
     render();
-    toast(action.type === "cancelSale" ? "ยกเลิกการขายและคืนสต็อกแล้ว" : action.type === "refundSale" ? "บันทึกคืนเงินแล้ว" : action.type === "ship" ? "บันทึกส่งสินค้าแล้ว" : "คืนรายการเข้ารอส่งแล้ว");
+    toast(action.type === "shippingCost" ? "แก้ไขค่าส่งและกำไรแล้ว" : action.type === "cancelSale" ? "ยกเลิกการขายและคืนสต็อกแล้ว" : action.type === "refundSale" ? "บันทึกคืนเงินแล้ว" : action.type === "ship" ? "บันทึกส่งสินค้าแล้ว" : "คืนรายการเข้ารอส่งแล้ว");
   }});
 }

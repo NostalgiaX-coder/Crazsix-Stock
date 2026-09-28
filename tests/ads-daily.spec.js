@@ -1,7 +1,7 @@
 const {test,expect}=require('@playwright/test');
 const {boot,nav,inventory,snapshot,expectSaved,today}=require('./helpers');
 const yesterday=()=>{const d=new Date(today()+'T12:00:00Z');d.setUTCDate(d.getUTCDate()-1);return d.toISOString().slice(0,10);};
-function seed(){const s=inventory();s.adCampaigns=[{id:'ad-1',name:'แอดเสื้อ',productId:'product-1',channel:'Facebook',status:'active',runMode:'until_budget',startDate:yesterday(),endDate:'',budget:1000,dailyBudget:100,targetQty:10,reservePercent:20,note:'',url:''}];s.adWallet=[{id:'topup',amount:500,date:yesterday(),note:''}];return s;}
+function seed(){const s=inventory();s.adCampaigns=[{id:'ad-1',name:'แอดเสื้อ',productId:'product-1',channel:'Facebook',status:'active',runMode:'until_budget',startDate:yesterday(),endDate:'',budget:1000,dailyBudget:100,autoDeduct:false,targetQty:10,reservePercent:20,note:'',url:''}];s.adWallet=[{id:'topup',amount:500,date:yesterday(),note:''}];return s;}
 async function record(page,date,amount,source='wallet') {
  await page.locator('.ad-spend-details > summary').click();const form=page.locator('.ad-spend-form');await form.locator('[name="date"]').fill(date);await form.locator('[name="amount"]').fill(amount);await form.locator('[name="paymentSource"]').selectOption(source);return form;
 }

@@ -1,5 +1,6 @@
 // Delivery is independent of stock and payment: both are recorded at checkout.
 import { money } from './preorders.js';
+import { allocateCashCosts } from './inventory-tools.js';
 export const deliveryLabels = {pending:'รอส่ง', partial:'ส่งบางส่วน', shipped:'ส่งสินค้าแล้ว', cancelled:'ยกเลิกการขายแล้ว'};
 const sale = tx => tx && ['income','installment'].includes(tx.type) && ['ขายสินค้า','ขายสินค้ายกเลิก'].includes(tx.category);
 const cash = n => Number.isFinite(n) && n>=0 && n<=1e12 && Math.abs(n-money(n))<1e-7;
@@ -29,12 +30,21 @@ export function validateShipments(shipments,transactions) {
       !text(s.recipient,2000) || !text(s.carrier,80) || !text(s.trackingNumber,120) || !text(s.note,1000) ||
       (s.status === 'cancelled' ? !validDate(s.cancelledAt) || s.cancelledAt < s.date : s.cancelledAt != null) ||
       !Array.isArray(s.items) || !s.items.length || new Set(s.items.map(i=>i?.saleId)).size !== s.items.length) return false;
+    const expenses=transactions.filter(tx=>tx.shipmentId===s.id);
+    if (s.shippingCost != null) {
+      if (!cash(s.shippingCost) || s.items.some(i=>!cash(i?.shippingShare)) || money(s.items.reduce((sum,i)=>sum+i.shippingShare,0))!==s.shippingCost ||
+        (s.shippingCost>0 ? expenses.length!==1 || expenses[0].amount!==s.shippingCost : expenses.length!==0)) return false;
+    } else if (expenses.length || s.items.some(i=>!i || i.shippingShare!=null)) return false;
     for (const item of s.items) {
       const tx = transactions.find(tx=>tx.id === item?.saleId);
       if (!trackedSale(tx) || !Number.isSafeInteger(item.qty) || item.qty < 1 || item.qty > tx.qty || s.date < tx.date) return false;
     }
   }
   return transactions.every(tx => {
+    if(tx.shipmentId!=null) {
+      const shipment=shipments.find(s=>s.id===tx.shipmentId);
+      if(!shipment || tx.type!=='expense' || tx.category!=='ค่าส่ง' || tx.date!==shipment.date || !cash(tx.amount) || tx.amount<=0) return false;
+    }
     if (tx.ledgerDeletedAt != null) {
       const parent = cancelledSaleFor(tx, transactions);
       if (!parent || !validDate(tx.ledgerDeletedAt) || tx.ledgerDeletedAt < parent.cancelledAt) return false;
@@ -45,6 +55,8 @@ export function validateShipments(shipments,transactions) {
     }
     if (tx.deliveryStatus == null) return tx.category!=='ขายสินค้ายกเลิก';
     if (!trackedSale(tx) || !Number.isSafeInteger(tx.qty) || tx.qty<=0) return false;
+    const parcelCost=money(shipments.reduce((sum,s)=>sum+s.items.filter(i=>i.saleId===tx.id).reduce((n,i)=>n+(i.shippingShare||0),0),0));
+    if (parcelCost>0 && (!cash(tx.shipping) || parcelCost>tx.shipping || !Number.isFinite(tx.profit))) return false;
     if (tx.deliveryStatus==='cancelled') {
       const refunds=transactions.filter(t=>t.saleCancellationId===tx.id);
       const paid=tx.type==='installment' ? money(transactions.filter(t=>t.installmentId===tx.id && t.type==='income').reduce((sum,t)=>sum+t.amount,0)) : tx.amount;
@@ -60,6 +72,28 @@ export function applyShipmentAction(state,action,id,today) {
   const products = structuredClone(state.products);
   const check = (ok,message) => {if (!ok) throw new Error(message);};
   check(JSON.stringify(shipments) === action.expectedShipments, 'รายการจัดส่งเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุดแล้วเลือกใหม่');
+  const setShippingCost=(shipment,cost)=>{
+    check(cash(cost), 'ค่าส่งต้องเป็นจำนวนตั้งแต่ 0 และมีทศนิยมไม่เกิน 2 ตำแหน่ง');
+    const count=shipment.items.reduce((sum,i)=>sum+i.qty,0);
+    const shares=allocateCashCosts(shipment.items.map(i=>cost*i.qty/count));
+    shipment.items.forEach((item,index)=>{
+      const tx=transactions.find(t=>t.id===item.saleId), delta=money(shares[index]-(item.shippingShare||0));
+      check(trackedSale(tx),'ไม่พบรายการขายของพัสดุนี้');
+      if(delta) {
+        check(Number.isFinite(tx.profit) && cash(tx.shipping||0) && money((tx.shipping||0)+delta)>=0,'ข้อมูลกำไรหรือค่าส่งของรายการขายไม่ถูกต้อง');
+        tx.shipping=money((tx.shipping||0)+delta);tx.profit=money(tx.profit-delta);
+      }
+      item.shippingShare=shares[index];
+    });
+    shipment.shippingCost=cost;
+    const existing=transactions.findIndex(t=>t.shipmentId===shipment.id);
+    if(existing>=0) transactions.splice(existing,1);
+    if(cost>0) {
+      const expenseId='shipment-cost-'+shipment.id;
+      check(!transactions.some(t=>t.id===expenseId),'รหัสรายการค่าส่งซ้ำ กรุณาเปิดข้อมูลล่าสุด');
+      transactions.unshift({id:expenseId,shipmentId:shipment.id,type:'expense',category:'ค่าส่ง',date:shipment.date,amount:cost,desc:`ค่าส่งพัสดุ ${shipment.trackingNumber || shipment.id} · ${shipment.items.length} รายการ`});
+    }
+  };
   let affected;
   if (['cancelSale','refundSale'].includes(action.type)) {
     const tx=transactions.find(t=>t.id===action.saleId);
@@ -93,7 +127,15 @@ export function applyShipmentAction(state,action,id,today) {
       check(data.date >= tx.date, 'วันที่ส่งต้องไม่ก่อนวันที่ขายสินค้า');
     }
     shipments.unshift({id,status:'shipped',date:data.date,recipient:data.recipient,carrier:data.carrier,trackingNumber:data.trackingNumber,note:data.note,items:data.items.map(i=>({saleId:i.saleId,qty:i.qty}))});
+    if(data.shippingCost != null && data.shippingCost!==0) setShippingCost(shipments[0],data.shippingCost);
     affected = data.items.map(i=>i.saleId);
+  } else if(action.type==='shippingCost') {
+    const shipment=shipments.find(s=>s.id===action.shipmentId);
+    check(shipment && JSON.stringify(shipment)===action.expectedShipment,'ข้อมูลพัสดุเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุด');
+    check(shipment.items.every(i=>JSON.stringify(transactions.find(t=>t.id===i.saleId))===action.expectedSales?.[i.saleId]),'รายการขายเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุด');
+    setShippingCost(shipment,action.amount);
+    check(validateShipments(shipments,transactions),'ข้อมูลค่าส่งไม่ถูกต้อง');
+    return {transactions,shipments,products};
   } else if (action.type === 'cancel') {
     const shipment = shipments.find(s=>s.id === action.shipmentId);
     check(shipment && shipment.status === 'shipped' && JSON.stringify(shipment) === action.expectedShipment, 'รายการส่งสินค้าเปลี่ยนแปลง กรุณาตรวจสอบอีกครั้ง');

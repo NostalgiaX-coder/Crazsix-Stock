@@ -39,7 +39,7 @@ export function allocateAdSpend(amount, ids) {
 }
 export const adSpendAllocations = (tx, c) => tx.adAllocations || allocateAdSpend(tx.amount, campaignProductIds(c));
 export function validateAdCampaign(c) {
-  return c && textValid(c.id, 100, true) && !/[\s<>"'&]/.test(c.id) && textValid(c.productId, 100, true) &&
+  return c && validAutoHistory(c) && textValid(c.id, 100, true) && !/[\s<>"'&]/.test(c.id) && textValid(c.productId, 100, true) &&
     (c.productIds == null || (Array.isArray(c.productIds) && c.productIds.length > 0 && c.productIds[0] === c.productId && new Set(c.productIds).size === c.productIds.length && c.productIds.every(id => textValid(id, 100, true)))) &&
     textValid(c.name, 120, true) && textValid(c.channel, 80, true) && Object.hasOwn(adStatuses, c.status) &&
     dateValid(c.startDate) && (c.runMode == null || ['dated', 'until_budget'].includes(c.runMode)) &&
@@ -92,10 +92,15 @@ export function productAdMetrics(product, campaigns, transactions, today) {
 export function validateAdsBackup(campaigns, transactions, products) {
   if (!Array.isArray(campaigns) || !campaigns.every(validateAdCampaign) || new Set(campaigns.map(c => c.id)).size !== campaigns.length || campaigns.some(c => campaignProductIds(c).some(id => !products.some(p => p.id === id)))) return false;
   return transactions.every(tx => {
+    if (tx.adAutomatic != null && (tx.adAutomatic !== true || !isAdSpend(tx) || tx.adWalletFunded !== true || tx.id !== 'ad-auto-'+tx.adCampaignId+'-'+tx.date)) return false;
     if (tx.adWalletFunded != null && (typeof tx.adWalletFunded !== 'boolean' || !isAdSpend(tx))) return false;
     if (!tx.adCampaignId) return tx.adCampaignId == null && tx.adAllocations == null;
     const c = campaigns.find(c => c.id === tx.adCampaignId);
     if (!c) return false;
+    if (tx.adAutomatic) {
+      const h=c.autoHistory?.filter(h=>h.date<=tx.date).at(-1);
+      if (!h || !h.enabled || h.status!=='active' || tx.date<h.startDate || (h.runMode==='dated' && tx.date>h.endDate) || tx.amount>h.dailyBudget) return false;
+    }
     if (isAdSpend(tx)) {
       const a = tx.adAllocations;
       return cash(tx.amount) && tx.amount > 0 && (a == null ? campaignProductIds(c).length === 1 : Array.isArray(a) && a.length > 0 &&
@@ -105,6 +110,68 @@ export function validateAdsBackup(campaigns, transactions, products) {
     if (tx.deliveryStatus === "cancelled" && tx.category === "ขายสินค้ายกเลิก") tx = {...tx,category:"ขายสินค้า"};
     return isAdSale(tx) && products.some(p => campaignHasProduct(c,p.id) && saleMatchesProduct(tx,p)) && cash(tx.amount) && Number.isSafeInteger(tx.qty) && tx.qty > 0;
   });
+}
+
+// Automatic entries are estimates from completed Bangkok calendar days, not platform receipts.
+const autoSnapshot = (c, wallet, date) => ({date, startDate:c.startDate, endDate:c.endDate,
+  runMode:c.runMode || 'dated', status:c.status, dailyBudget:c.dailyBudget || 0,
+  enabled:c.autoDeduct !== false, productIds:campaignProductIds(c),
+  baseBudget:money(c.budget-wallet.filter(e=>e.campaignId===c.id).reduce((sum,e)=>sum+e.amount,0))});
+function ensureAutoHistory(c, wallet, today) {
+  if (!c.autoHistory && c.dailyBudget > 0) c.autoHistory=[autoSnapshot(c,wallet,c.startDate < today ? c.startDate : today)];
+}
+function validAutoHistory(c) {
+  return (c.autoDeduct == null || typeof c.autoDeduct === 'boolean') && (c.autoHistory == null ||
+    (Array.isArray(c.autoHistory) && c.autoHistory.length>0 && c.autoHistory.every((h,i)=>h && dateValid(h.date) &&
+      (!i || h.date>c.autoHistory[i-1].date) && dateValid(h.startDate) && ['dated','until_budget'].includes(h.runMode) &&
+      (h.runMode==='until_budget' ? h.endDate==='' : dateValid(h.endDate) && h.endDate>=h.startDate) &&
+      Object.hasOwn(adStatuses,h.status) && cash(h.dailyBudget) && typeof h.enabled==='boolean' &&
+      Number.isFinite(h.baseBudget) && cash(Math.abs(h.baseBudget)) && Array.isArray(h.productIds) && h.productIds.length>0 &&
+      new Set(h.productIds).size===h.productIds.length && h.productIds.every(id=>campaignHasProduct(c,id)))));
+}
+export function reconcileAutomaticAds(state, today) {
+  if (!dateValid(today)) throw new Error('วันที่คำนวณค่าแอดไม่ถูกต้อง');
+  const campaigns=structuredClone(state.adCampaigns), wallet=state.adWallet || [];
+  const actual=state.transactions.filter(tx=>tx.adAutomatic !== true);
+  const actualIds=new Set(actual.map(tx=>tx.id));
+  const previousAuto=new Map(state.transactions.filter(tx=>tx.adAutomatic===true).map(tx=>[tx.id,tx]));
+  campaigns.forEach(c=>ensureAutoHistory(c,wallet,today));
+  const candidates=campaigns.filter(c=>c.autoHistory?.length).sort((a,b)=>a.id.localeCompare(b.id));
+  const generated=[];
+  if (candidates.length && wallet.length) {
+    const first=[...candidates.map(c=>c.autoHistory[0].date)].sort()[0];
+    const fundedFrom=wallet.map(e=>e.date).sort()[0];
+    const start=first>fundedFrom ? first : fundedFrom;
+    // Bound imported dates before building a daily ledger.
+    if ((Date.parse(today)-Date.parse(start))/86400000>36600) throw new Error('ช่วงคำนวณค่าแอดยาวเกิน 100 ปี กรุณาตรวจวันที่');
+    const deposits=new Map(), payments=new Map(), manualDays=new Set(), topups=new Map();
+    const add=(map,key,value)=>map.set(key,money((map.get(key)||0)+value));
+    wallet.forEach(e=>{add(deposits,e.date,e.amount);if(e.campaignId)add(topups,e.campaignId+'|'+e.date,e.amount);});
+    actual.filter(isAdSpend).forEach(tx=>{if(tx.adWalletFunded)add(payments,tx.date,tx.amount);manualDays.add(tx.adCampaignId+'|'+tx.date);});
+    let credit=money(wallet.filter(e=>e.date<start).reduce((s,e)=>s+e.amount,0)-actual.filter(tx=>isAdSpend(tx)&&tx.adWalletFunded&&tx.date<start).reduce((s,tx)=>s+tx.amount,0));
+    const spent=new Map(), funded=new Map(), expenses=new Map();
+    actual.filter(isAdSpend).forEach(tx=>{if(tx.date<start)add(spent,tx.adCampaignId,tx.amount);else add(expenses,tx.adCampaignId+'|'+tx.date,tx.amount);});
+    wallet.filter(e=>e.campaignId&&e.date<start).forEach(e=>add(funded,e.campaignId,e.amount));
+    for(let timestamp=Date.parse(start);timestamp<Date.parse(today);timestamp+=86400000) {
+      const date=new Date(timestamp).toISOString().slice(0,10);
+      credit=money(credit+(deposits.get(date)||0)-(payments.get(date)||0));
+      for(const c of candidates) {
+        const key=c.id+'|'+date;
+        add(funded,c.id,topups.get(key)||0);add(spent,c.id,expenses.get(key)||0);
+        const h=c.autoHistory.filter(h=>h.date<=date).at(-1);
+        if (!h || !h.enabled || h.status!=='active' || !h.dailyBudget || date<h.startDate || (h.runMode==='dated'&&date>h.endDate) || manualDays.has(key)) continue;
+        const amount=money(Math.max(0,Math.min(h.dailyBudget,credit,h.baseBudget+(funded.get(c.id)||0)-(spent.get(c.id)||0))));
+        if (!amount) continue;
+        const id='ad-auto-'+c.id+'-'+date;
+        if(actualIds.has(id)) throw new Error('รหัสรายการค่าแอดอัตโนมัติซ้ำ กรุณาตรวจประวัติ');
+        const previous=previousAuto.get(id);
+        generated.push({id,adCampaignId:c.id,adAutomatic:true,adWalletFunded:true,type:'expense',category:'ค่าโฆษณาสินค้า',amount,date,
+          adAllocations:previous?.amount===amount && previous.adAllocations ? previous.adAllocations : allocateAdSpend(amount,h.productIds),desc:`${c.name} · หักอัตโนมัติตามงบต่อวัน (ประมาณการ)`});
+        credit=money(credit-amount);add(spent,c.id,amount);
+      }
+    }
+  }
+  return {adCampaigns:campaigns,adWallet:structuredClone(wallet),transactions:[...generated.reverse(),...actual]};
 }
 
 // Returns new arrays only after all validations pass; caller commits them atomically.
@@ -136,7 +203,7 @@ export function applyAdAction(state, action, id, today) {
       wallet = wallet.filter(e => e.id !== action.entryId);
     }
     if (!validateAdWallet(wallet,campaigns)) throw new Error('ยอดเติมเงินต้องมากกว่า 0 ทศนิยมไม่เกิน 2 ตำแหน่ง และหมายเหตุไม่เกิน 500 ตัวอักษร');
-    return {adCampaigns:campaigns, transactions, adWallet:wallet};
+    return reconcileAutomaticAds({...state,adCampaigns:campaigns,transactions,adWallet:wallet},today);
   }
   const campaign = campaigns.find(c => c.id === action.campaignId);
   if (action.type !== 'create' && (!campaign || JSON.stringify(campaign) !== action.expected)) throw new Error('แคมเปญเปลี่ยนแปลง กรุณาเปิดรายการล่าสุดแล้วลองอีกครั้ง');
@@ -145,6 +212,11 @@ export function applyAdAction(state, action, id, today) {
   if (!selectedIds.length || selectedProducts.length !== selectedIds.length) throw new Error('ไม่พบสินค้าที่ผูกกับแคมเปญ');
   if (['create', 'edit'].includes(action.type)) {
     const next = { ...action.values, id: campaign?.id || id };
+    delete next.autoHistory;
+    if(campaign) {
+      ensureAutoHistory(campaign,wallet,today);
+      if(campaign.autoHistory) next.autoHistory=[...campaign.autoHistory.filter(h=>h.date<today),autoSnapshot(next,wallet,today)];
+    }
     if (!validateAdCampaign(next) || campaignProductIds(next).some(id => !state.products.some(p => p.id === id))) throw new Error('กรุณาตรวจชื่อสินค้า งบ จำนวนเป้าหมาย วันที่ และสัดส่วนเก็บกำไร 0–100%');
     if (campaign) {
       const removed = selectedProducts.filter(p => !campaignHasProduct(next,p.id));
@@ -171,6 +243,7 @@ export function applyAdAction(state, action, id, today) {
       if (tx.adCampaignId !== campaign.id) throw new Error('รายการนี้ไม่ได้ผูกกับแคมเปญ');
       if (action.type === 'removeSpend') {
         if (!isAdSpend(tx)) throw new Error('รายการนี้ไม่ใช่ค่าแอด');
+        if (tx.adAutomatic) throw new Error('รายการนี้คำนวณอัตโนมัติ ให้บันทึกยอดใช้จริงของวันนั้นแทน หรือปรับการหักอัตโนมัติในแคมเปญ');
         transactions = transactions.filter(t => t.id !== tx.id);
       } else {
         if (!isAdSale(tx)) throw new Error('รายการนี้ไม่ใช่ยอดขาย');
@@ -182,5 +255,5 @@ export function applyAdAction(state, action, id, today) {
     if (transactions.some(tx => tx.adCampaignId === campaign.id)) throw new Error('แคมเปญมีค่าใช้จ่ายหรือยอดขายแล้ว ให้เปลี่ยนสถานะเป็นจบแคมเปญเพื่อเก็บประวัติ');
     campaigns = campaigns.filter(c => c.id !== campaign.id);
   } else throw new Error('ไม่รองรับคำสั่งนี้');
-  return { adCampaigns: campaigns, transactions, adWallet:wallet };
+  return reconcileAutomaticAds({...state,adCampaigns:campaigns,transactions,adWallet:wallet},today);
 }

@@ -17,6 +17,7 @@ export function renderShipments({transactions,shipments=[]},{esc,today,fmt,metri
     <div class="field"><label for="shipment-date">วันที่ส่ง</label><input id="shipment-date" name="date" type="date" value="${today}" max="${today}" required></div>
     <div class="field"><label for="shipment-carrier">ขนส่ง (ถ้ามี)</label><input id="shipment-carrier" name="carrier" maxlength="80" placeholder="เช่น ไปรษณีย์ไทย"></div>
     <div class="field"><label for="shipment-tracking">เลขพัสดุ (ถ้ามี)</label><input id="shipment-tracking" name="trackingNumber" maxlength="120"></div>
+    <div class="field"><label for="shipment-cost">ค่าส่งเพิ่มของพัสดุนี้ (บาท)</label><input id="shipment-cost" name="shippingCost" type="number" min="0" max="1000000000000" step="0.01" value="0" required><small class="hint">ยอดรวมสำหรับทุกรายการที่เลือก แบ่งตามจำนวนชิ้น ลงรายจ่ายครั้งเดียวและหักกำไรสินค้า กรอกเฉพาะค่าส่งที่ยังไม่ได้ลงตอนขาย</small></div>
     <div class="field"><label for="shipment-note">หมายเหตุ</label><textarea id="shipment-note" name="note" maxlength="1000" rows="2"></textarea></div></div>
     <button id="shipment-submit" class="btn btn-primary" type="submit" disabled>ส่งสินค้าแล้ว</button></form>
     <p class="hint">ยอดขายเก่าที่ยังไม่มีสถานะจัดส่งไม่ถูกนำมาขึ้นรอส่งอัตโนมัติ ส่วน pre-order ที่กดยืนยันส่งมอบแล้วจัดการอยู่ในประวัติ pre-order</p></section>
@@ -25,6 +26,7 @@ export function renderShipments({transactions,shipments=[]},{esc,today,fmt,metri
     <div class="shipment-history">${shipments.map(s=>`<article class="shipment-history-card" data-shipment-id="${esc(s.id)}"><div class="section-heading"><h3>${esc(s.recipient || 'พัสดุ '+s.id)}</h3><span class="tag ${s.status==='cancelled'?'expense':'income'}">${s.status==='cancelled'?'ยกเลิกการบันทึกส่ง':'ส่งสินค้าแล้ว'}</span></div>
       <p>${s.date} · ${esc(s.carrier || 'ไม่ระบุขนส่ง')} · เลขพัสดุ ${esc(s.trackingNumber || 'ยังไม่ระบุ')}</p>${s.note ? `<p>${esc(s.note)}</p>` : ''}
       <ul>${s.items.map(i=>`<li>${esc(transactions.find(tx=>tx.id===i.saleId)?.desc || i.saleId)} — ส่ง ${i.qty} ชิ้น</li>`).join('')}</ul>
+      <div class="field"><label for="shipment-cost-${esc(s.id)}">ค่าส่งพัสดุนี้ (บาท)</label><input id="shipment-cost-${esc(s.id)}" class="shipment-history-cost" type="number" min="0" max="1000000000000" step="0.01" value="${s.shippingCost || 0}"><button type="button" class="btn btn-ghost" data-shipment-cost="${esc(s.id)}">แก้ไขค่าส่ง</button><small class="hint">แก้ยอดรวมของพัสดุนี้ ใส่ 0 เพื่อลบค่าส่งที่ลงผิด ไม่กระทบค่าส่งที่บันทึกตอนขาย</small></div>
       ${s.status==='shipped'?`<button class="btn btn-ghost" data-shipment-cancel="${esc(s.id)}">ยกเลิกการบันทึกส่ง</button>`:`<p class="hint">ยกเลิกเมื่อ ${s.cancelledAt} · นำจำนวนกลับเข้ารอส่งแล้ว</p>`}</article>`).join('') || '<p class="hint">ยังไม่มีประวัติการส่งสินค้า</p>'}</div></section>`;
 }
 
@@ -61,12 +63,18 @@ export function wireShipments(state,{commit,confirm,alert,csv}) {
     e.preventDefault(); const items=selected().map(r=>({saleId:r.dataset.pendingSale,qty:Number(r.querySelector('.shipment-qty').value)}));
     if (!items.length) {alert('เลือกสินค้าที่รอส่งอย่างน้อย 1 รายการ');return;}
     const values=Object.fromEntries([...new FormData(form)].map(([k,v])=>[k,String(v).trim()])); values.items=items;
-    run({type:'ship',values,expectedSales:expectedSales(items.map(i=>i.saleId))},`ยืนยันส่งสินค้าแล้ว ${items.reduce((n,i)=>n+i.qty,0)} ชิ้น รวม ${items.length} รายการ ในพัสดุเดียวกัน?\nผู้รับ: ${values.recipient || 'ยังไม่ระบุ'}\nวันที่: ${values.date} · เลขพัสดุ: ${values.trackingNumber || 'ยังไม่ระบุ'}\n${items.map(i=>`${state.transactions.find(tx=>tx.id===i.saleId)?.desc} — ส่ง ${i.qty} ชิ้น`).join('\n')}\nจะไม่ตัดสต็อกหรือบันทึกรายรับซ้ำ`);
+    values.shippingCost=Number(values.shippingCost);
+    run({type:'ship',values,expectedSales:expectedSales(items.map(i=>i.saleId))},`ยืนยันส่งสินค้าแล้ว ${items.reduce((n,i)=>n+i.qty,0)} ชิ้น รวม ${items.length} รายการ ในพัสดุเดียวกัน?\nผู้รับ: ${values.recipient || 'ยังไม่ระบุ'}\nวันที่: ${values.date} · เลขพัสดุ: ${values.trackingNumber || 'ยังไม่ระบุ'}\n${items.map(i=>`${state.transactions.find(tx=>tx.id===i.saleId)?.desc} — ส่ง ${i.qty} ชิ้น`).join('\n')}\nบันทึกค่าส่งเพิ่ม ${values.shippingCost} บาทครั้งเดียว แบ่งตามจำนวนชิ้น\nจะไม่ตัดสต็อกหรือบันทึกรายรับซ้ำ`);
   };
   document.querySelectorAll('[data-shipment-cancel]').forEach(button=>button.onclick=()=>{
     const shipment=state.shipments.find(s=>s.id===button.dataset.shipmentCancel);
-    run({type:'cancel',shipmentId:shipment.id,expectedShipment:JSON.stringify(shipment),expectedSales:expectedSales(shipment.items.map(i=>i.saleId))},'ยกเลิกการบันทึกส่งพัสดุนี้? จำนวนจะกลับเข้ารอส่ง โดยไม่คืนสต็อกหรือเงิน และยังเก็บประวัติการยกเลิกไว้');
+    run({type:'cancel',shipmentId:shipment.id,expectedShipment:JSON.stringify(shipment),expectedSales:expectedSales(shipment.items.map(i=>i.saleId))},'ยกเลิกการบันทึกส่งพัสดุนี้? จำนวนจะกลับเข้ารอส่ง โดยไม่คืนสต็อกหรือเงิน ค่าส่งยังคงอยู่ หากลงผิดให้แก้ค่าส่งเป็น 0 ในประวัติพัสดุ และยังเก็บประวัติการยกเลิกไว้');
   });
-  document.getElementById('shipment-export').onclick=()=>csv('shipments',[['รหัสพัสดุ','สถานะ','วันที่ส่ง','ผู้รับ','ขนส่ง','เลขพัสดุ','รหัสขาย','สินค้า','จำนวนส่ง','หมายเหตุ'],...state.shipments.flatMap(s=>s.items.map(i=>[s.id,s.status,s.date,s.recipient,s.carrier,s.trackingNumber,i.saleId,state.transactions.find(tx=>tx.id===i.saleId)?.desc || '',i.qty,s.note]))]);
+  document.querySelectorAll('[data-shipment-cost]').forEach(button=>button.onclick=()=>{
+    const shipment=state.shipments.find(s=>s.id===button.dataset.shipmentCost);
+    const amount=Number(button.closest('[data-shipment-id]').querySelector('.shipment-history-cost').value);
+    run({type:'shippingCost',shipmentId:shipment.id,amount,expectedShipment:JSON.stringify(shipment),expectedSales:expectedSales(shipment.items.map(i=>i.saleId))},`แก้ค่าส่งรวมพัสดุนี้เป็น ${amount} บาท? ระบบปรับรายจ่ายและกำไรของรายการที่แนบ โดยไม่เปลี่ยนสต็อก`);
+  });
+  document.getElementById('shipment-export').onclick=()=>csv('shipments',[['รหัสพัสดุ','สถานะ','วันที่ส่ง','ผู้รับ','ขนส่ง','เลขพัสดุ','รหัสขาย','สินค้า','จำนวนส่ง','ค่าส่งส่วนของรายการนี้','หมายเหตุ'],...state.shipments.flatMap(s=>s.items.map(i=>[s.id,s.status,s.date,s.recipient,s.carrier,s.trackingNumber,i.saleId,state.transactions.find(tx=>tx.id===i.saleId)?.desc || '',i.qty,i.shippingShare||0,s.note]))]);
   update();
 }
