@@ -101,6 +101,12 @@ test('cancelling a customer preorder records a full refund and retains history',
   await page.locator('#preorder-filter').selectOption('cancelled');
   await expect(page.locator('[data-preorder]:visible')).toContainText('คืนเงินแล้ว');
   await expect(page.locator('[data-preorder-action]')).toHaveCount(0);
+  await nav(page, 'home');
+  await expect(page.locator('.income-stat')).toContainText('฿0');
+  await expect(page.locator('.expense-stat')).toContainText('฿0');
+  await nav(page, 'report');
+  await expect(page.locator('#report-range-summary .val').nth(0)).toHaveText('฿0');
+  await expect(page.locator('#report-range-summary .val').nth(1)).toHaveText('฿0');
 });
 
 test('invalid deposits, edits below paid total, and incomplete payments cannot close orders', async ({ page }) => {

@@ -6,9 +6,10 @@ const sale = tx => tx && ['income','installment'].includes(tx.type) && ['ขา�
 const cash = n => Number.isFinite(n) && n>=0 && n<=1e12 && Math.abs(n-money(n))<1e-7;
 // Receipts and refunds remain available for actual cash flow and refund reconciliation.
 export const cancelledSaleFor = (tx, transactions) => tx.deliveryStatus === 'cancelled' ? tx : transactions.find(parent => parent.deliveryStatus === 'cancelled' && (parent.id === tx.installmentId || parent.id === tx.saleCancellationId));
-export function activeAccountingTransactions(transactions) {
+export function activeAccountingTransactions(transactions, preorders = []) {
+  const cancelledPreorders = new Set(preorders.filter(order => order.status === "cancelled").map(order => order.id));
   const cancelledIds = new Set(transactions.filter(tx=>tx.deliveryStatus==='cancelled').map(tx=>tx.id));
-  return transactions.filter(tx=>!cancelledIds.has(tx.id) && !cancelledIds.has(tx.installmentId) && !cancelledIds.has(tx.saleCancellationId));
+  return transactions.filter(tx=>!tx.ledgerDeletedAt && !cancelledPreorders.has(tx.preorderId) && !cancelledIds.has(tx.id) && !cancelledIds.has(tx.installmentId) && !cancelledIds.has(tx.saleCancellationId));
 }
 export const cancellationRefundDue = tx => tx.type === 'installment' ? (tx.paidAmount || 0) : tx.amount;
 const validDate = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0,10) === value;

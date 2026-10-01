@@ -661,7 +661,7 @@ function lowStockVariants() {
   );
 }
 function monthSummary(key) {
-  const list = activeAccountingTransactions(transactions).filter(t => monthKey(t.date) === key);
+  const list = activeAccountingTransactions(transactions, preorders).filter(t => monthKey(t.date) === key);
   const income = list
     .filter((t) => t.type === "income")
     .reduce((s, t) => s + t.amount, 0);
@@ -1100,20 +1100,27 @@ async function receivePendingOrdersBulk(ids, shippingTotal, quantities = {}) {
 }
 
 async function deletePendingOrder(pendingId) {
-  const reviewed = JSON.stringify(pendingOrders.find(order => order.id === pendingId));
-  if (!reviewed) return;
+  const order = pendingOrders.find(order => order.id === pendingId);
+  if (!order) return;
+  const reviewed = JSON.stringify([order, transactions]);
   if (
     !(await showConfirm(
-      "ยกเลิกรายการสั่งซื้อนี้? (ยอดที่จ่ายไปแล้วจะยังอยู่ในบัญชีรายจ่าย ไม่ถูกลบ)",
+      "ยกเลิกรายการสั่งซื้อนี้และหักยอดสินค้าที่ยังไม่ได้รับออกจากบัญชีรายจ่าย? สินค้าที่รับแล้วและค่าส่งยังคงเดิม",
     ))
   )
     return;
-  if (reviewed !== JSON.stringify(pendingOrders.find(order => order.id === pendingId))) {
+  if (reviewed !== JSON.stringify([pendingOrders.find(order => order.id === pendingId), transactions])) {
     showAlert("รายการรอรับเปลี่ยนแปลงระหว่างยืนยัน กรุณาตรวจสอบอีกครั้ง");
     return;
   }
+  transactions = transactions.flatMap(tx => {
+    if (tx.type !== "expense" || !tx.pendingIds?.includes(pendingId)) return [tx];
+    const amount = money(Math.max(0, tx.amount - money(order.cost * order.qty)));
+    if (amount === 0) return [];
+    return [{ ...tx, amount, pendingIds: tx.pendingIds.filter(id => id !== pendingId) }];
+  });
   pendingOrders = pendingOrders.filter((p) => p.id !== pendingId);
-  await savePending();
+  await saveData("pendingOrders", "transactions");
   render();
 }
 
@@ -1300,6 +1307,8 @@ async function sellVariant(variantId, data) {
   }
   const campaign = data.adCampaignId ? adCampaigns.find(c => c.id === data.adCampaignId && campaignHasProduct(c, product.id)) : null;
   if (data.adCampaignId && !campaign) { showAlert("ไม่พบแคมเปญของสินค้านี้ กรุณาเลือกใหม่"); return; }
+  const adReservePerUnit = campaign ? (String(data.adReservePerUnit ?? '').trim() === '' ? campaign.reservePerUnit : Number(data.adReservePerUnit)) : null;
+  if (adReservePerUnit != null && (!validCash(adReservePerUnit) || adReservePerUnit < 0 || !validCash(money(adReservePerUnit * qty)))) { showAlert("ยอดแบ่งยิงแอดต้องตั้งแต่ 0 และมีทศนิยมไม่เกิน 2 ตำแหน่ง"); return; }
   const customerNote = String(data.customerNote || "").trim();
   if (customerNote.length > 2000) { showAlert("ข้อมูลผู้รับต้องไม่เกิน 2,000 ตัวอักษร"); return; }
   variant.qty -= qty;
@@ -1331,7 +1340,7 @@ async function sellVariant(variantId, data) {
       stockProductId: product.id,
       deliveryStatus: "pending",
       ...measurementsOf(variant),
-      ...(campaign ? { adCampaignId: campaign.id } : {}),
+      ...(campaign ? { adCampaignId: campaign.id, ...(adReservePerUnit != null ? { adReservePerUnit } : {}) } : {}),
       paidAmount: deposit,
       dueDate: addDaysStr(data.dueDays),
       customerNote: note,
@@ -1367,7 +1376,7 @@ async function sellVariant(variantId, data) {
       profit,
       stockProductId: product.id,
       ...measurementsOf(variant),
-      ...(campaign ? { adCampaignId: campaign.id } : {}),
+      ...(campaign ? { adCampaignId: campaign.id, ...(adReservePerUnit != null ? { adReservePerUnit } : {}) } : {}),
     });
   }
   if (shipping > 0) {
@@ -1725,7 +1734,7 @@ function render() {
     <main class="main-content" id="main-content">
       <div class="topbar"><div class="breadcrumb">Workspace <span>/</span> <strong>${meta[1]}</strong></div><div class="topbar-right">${themeToggle()}<span class="sync-status"><span class="online-dot"></span>เชื่อมต่อแล้ว</span><span class="topbar-date">${icon("calendar")}${dateLabel}</span><span class="avatar avatar-small">C</span></div></div>
       <header class="page-header"><div><p class="eyebrow">${activeTab === "home" ? "YOUR STORE, AT A GLANCE" : "CRAZSIX STORE"}</p><h1>${meta[0]}<span class="heading-dot">.</span></h1><p class="subline">${meta[3]}</p></div><div class="header-actions"><button class="btn btn-ghost" data-go="stock" data-workspace="add">${icon("plus")}เพิ่มสินค้า</button><button class="btn btn-primary" data-go="sell">${icon("bag")}บันทึกการขาย</button></div></header>
-      ${activeTab === "home" ? `<section class="stats" aria-label="สรุปร้านเดือนนี้">${metric("มูลค่าสต็อก", fmtMoney(stockValue()), `${products.length} สินค้า · คงเหลือ ${totalQty.toLocaleString("th-TH")} ชิ้น`, "box")}${metric("รายรับเดือนนี้", fmtMoney(ms.income), "เงินรับเดือนนี้ ไม่รวมยอดขายยกเลิก", "up", "income-stat")}${metric("รายจ่ายเดือนนี้", fmtMoney(ms.expense), "รวมต้นทุนและค่าใช้จ่าย ไม่รวมเงินคืนขายยกเลิก", "down", "expense-stat")}${metric("เงินสุทธิเดือนนี้", fmtMoney(ms.profit), "รายรับ − รายจ่าย", "wallet", "profit")}</section>` : ""}
+      ${activeTab === "home" ? `<section class="stats" aria-label="สรุปร้านเดือนนี้">${metric("มูลค่าสต็อก", fmtMoney(stockValue()), `${products.length} สินค้า · คงเหลือ ${totalQty.toLocaleString("th-TH")} ชิ้น`, "box")}${metric("รายรับเดือนนี้", fmtMoney(ms.income), "ไม่รวมยอดขายและ pre-order ที่ยกเลิก", "up", "income-stat")}${metric("รายจ่ายเดือนนี้", fmtMoney(ms.expense), "รวมต้นทุนและค่าใช้จ่าย ไม่รวมเงินคืนรายการยกเลิก", "down", "expense-stat")}${metric("เงินสุทธิเดือนนี้", fmtMoney(ms.profit), "รายรับ − รายจ่าย", "wallet", "profit")}</section>` : ""}
       <div id="tab-content" class="tab-content"></div>
       <footer><span>CRAZSIX <span class="footer-dot">•</span> Your everyday store companion</span><details class="data-tools"><summary>จัดการข้อมูล ${icon("chevron")}</summary><div class="footer-actions"><button id="export-btn">${icon("download")}สำรองข้อมูล</button><button id="import-btn">${icon("upload")}นำเข้าข้อมูล</button><button data-export="inventory">ส่งออกสต็อก CSV</button><button data-export="transactions">ส่งออกบัญชี CSV</button><button data-export="preorders">ส่งออก pre-order CSV</button><button id="reset-btn" class="danger-text">ล้างข้อมูลทั้งหมด</button></div></details><input type="file" id="import-input" accept=".json,application/json" hidden></footer>
     </main>`;
@@ -3436,7 +3445,8 @@ function renderSellTab() {
           <div class="field"><label>ค่ากลาง (รวม)</label><input class="sell-commission" type="number" min="0" step="0.01" value="0"></div>
         </div>
         <div class="field"><label>ยอดขายมาจากแคมเปญ (ถ้ามี)</label><select class="sell-ad-campaign"><option value="">ไม่ระบุแคมเปญ</option></select></div>
-        <p class="hint sell-ad-preview"></p>
+        <div class="field"><label>แบ่งยิงแอดต่อ (บาท/ชิ้น)</label><input class="sell-ad-reserve" type="number" min="0" max="1000000000000" step="0.01" placeholder="ใช้ค่าที่ตั้งในแคมเปญ" disabled></div>
+        <p class="hint sell-ad-preview" aria-live="polite"></p>
         <div class="sale-total" aria-live="polite"><span>ยอดขายรวม / กำไรประมาณ</span><b class="sale-total-value"></b></div>
         <button class="btn btn-gold btn-sm sell-submit" style="width:100%; margin-top:10px;" data-sell="${first.id}">${icon("bag")}บันทึกการขาย</button>
         <div class="checkline" style="margin-top:10px;"><input type="checkbox" class="sell-installment"><label>ลูกค้าผ่อนชำระ (ไม่ได้เงินก้อนเดียว)</label></div>
@@ -3509,7 +3519,11 @@ function wireSellTab() {
     card.querySelector(".sale-total-value").textContent =
       `${fmtMoney(total)} / ${fmtMoney(profit)}`;
     const campaign = adCampaigns.find(c => c.id === card.querySelector(".sell-ad-campaign").value);
-    card.querySelector(".sell-ad-preview").textContent = campaign ? "ผูกยอดขายกับแคมเปญนี้ ค่าแอดหักจากเครดิต Ads Manager ดูต้นทุนและกำไรหลังแอดในเมนูยิงแอด" : "กำไรประมาณด้านล่างยังไม่หักค่าแอด เลือกแคมเปญเพื่อผูกยอดขาย";
+    const reserveInput = card.querySelector(".sell-ad-reserve");
+    reserveInput.disabled = !campaign;
+    reserveInput.placeholder = campaign?.reservePerUnit != null ? String(campaign.reservePerUnit) : "เว้นว่างเพื่อใช้เปอร์เซ็นต์กำไร";
+    const rate = reserveInput.value.trim() === '' ? campaign?.reservePerUnit : Number(reserveInput.value);
+    card.querySelector(".sell-ad-preview").textContent = campaign ? (rate != null ? `แบ่งยิงแอดรายการนี้ ${fmtMoney(money(rate * qty))} (${fmtMoney(rate)} × ${qty} ชิ้น) · เป็นยอดวางแผน ยังไม่หักเงินจริงหรือเติมเครดิต` : `ใช้ ${campaign.reservePercent}% ของกำไรตามเงินรับหลังแอด คำนวณสะสมในเมนูยิงแอด หรือใส่บาทต่อชิ้นสำหรับรายการนี้`) : "เลือกแคมเปญเพื่อแบ่งเก็บยิงแอดต่อ";
   }
   function syncSaleCard(card) {
     const color = card.querySelector(".sell-color-select").value;
@@ -3533,6 +3547,7 @@ function wireSellTab() {
     const adSelect = card.querySelector(".sell-ad-campaign"), previousCampaign = adSelect.value;
     adSelect.innerHTML = '<option value="">ไม่ระบุแคมเปญ</option>' + adCampaigns.filter(c => campaignHasProduct(c, found.product.id) && c.status !== "cancelled").map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)} · ${c.startDate}–${campaignUntilBudget(c) ? 'จนเครดิตหมด' : c.endDate}</option>`).join("");
     if ([...adSelect.options].some(o => o.value === previousCampaign)) adSelect.value = previousCampaign;
+    if (adSelect.value !== previousCampaign) card.querySelector(".sell-ad-reserve").value = "";
     const qty = card.querySelector(".sell-qty");
     qty.max = variant.qty;
     if (Number(qty.value) > variant.qty) qty.value = 1;
@@ -3546,7 +3561,8 @@ function wireSellTab() {
     updateSaleTotal(card);
   }
   document.querySelectorAll("[data-sale-card]").forEach((card) => {
-    card.querySelector(".sell-ad-campaign").onchange = () => updateSaleTotal(card);
+    card.querySelector(".sell-ad-campaign").onchange = () => { card.querySelector(".sell-ad-reserve").value = ""; updateSaleTotal(card); };
+    card.querySelector(".sell-ad-reserve").oninput = () => updateSaleTotal(card);
     card.querySelector(".sell-color-select").onchange = () =>
       syncSaleCard(card);
     card.querySelector(".sell-size-select").onchange = () => syncSaleCard(card);
@@ -3577,6 +3593,7 @@ function wireSellTab() {
         deposit: card.querySelector(".sell-deposit").value,
         customerNote: card.querySelector(".sell-customer").value,
         adCampaignId: card.querySelector(".sell-ad-campaign").value,
+        adReservePerUnit: card.querySelector(".sell-ad-reserve").value,
       });
     };
   });
@@ -3926,7 +3943,7 @@ function renderReportTab() {
     </div>
   `;
 
-  return `<div class="panel"><h2>รายรับ–รายจ่ายรายเดือน</h2><p class="hint">ยอดสุทธิ = รายรับ − รายจ่ายของแต่ละเดือน ไม่รวมยอดขายยกเลิก เงินผ่อนที่รับจากยอดขายยกเลิก และเงินคืนที่เกี่ยวข้อง รวมต้นทุนสินค้าที่ซื้อเข้า ดูเงินรับ/จ่ายจริงได้ในรายงานตามช่วงวันที่</p>${rows}</div>${chartSection}${topSection}${saleSection}`;
+  return `<div class="panel"><h2>รายรับ–รายจ่ายรายเดือน</h2><p class="hint">ยอดสุทธิ = รายรับ − รายจ่ายของแต่ละเดือน ไม่รวมยอดขายยกเลิก เงินผ่อนที่รับจากยอดขายยกเลิก และเงินคืนที่เกี่ยวข้อง รวมต้นทุนสินค้าที่ซื้อเข้า รายงานตามช่วงวันที่ใช้เกณฑ์เดียวกัน และไม่รวมรายการ pre-order ที่ยกเลิก</p>${rows}</div>${chartSection}${topSection}${saleSection}`;
 }
 
 let trendChartInstance = null;
@@ -4069,7 +4086,7 @@ function renderLocalInsights() {
   const previousKey = `${previousDate.getFullYear()}-${String(previousDate.getMonth() + 1).padStart(2, "0")}`;
   const sumAmount = (list) =>
     list.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
-  const accountingTransactions = activeAccountingTransactions(transactions);
+  const accountingTransactions = activeAccountingTransactions(transactions, preorders);
   const monthToDate = accountingTransactions.filter(
     (t) => monthKey(t.date) === currentKey && t.date <= today,
   );
@@ -4421,7 +4438,7 @@ function wireExportTools() {
   });
 }
 function renderRangeReport() {
-  return `<div class="panel"><h2>รายงานตามช่วงวันที่</h2><div class="task-filters"><div class="field"><label>ตั้งแต่วันที่</label><input id="report-from" type="date" value="${reportFrom}"></div><div class="field"><label>ถึงวันที่</label><input id="report-to" type="date" value="${reportTo}"></div><button class="btn btn-ghost" id="report-clear">ทุกช่วงเวลา</button><button class="btn btn-primary" id="report-export">ส่งออกช่วงนี้ CSV</button></div><p class="hint" id="report-range-error" role="status"></p><div id="report-range-summary" class="stats range-stats"></div><p class="hint">ค่าแอดอัตโนมัติในรายงานเป็นประมาณการตามงบต่อวัน จนกว่าจะบันทึกยอดจริงแทน เงินสดสุทธิรวมเงินรับและเงินคืนของยอดขายยกเลิกตามวันที่รับ/จ่ายจริง แม้ลบออกจากหน้าบัญชีแล้ว ส่วนสรุปรายเดือนตัดยอดขายยกเลิกและเงินคืนที่เกี่ยวข้องออก กำไรจากการขายคิดเฉพาะยอดขายในช่วงนี้ หักต้นทุนสินค้า ค่าส่ง และค่ากลางแล้ว กำไรหลังแอดหักค่าแอดที่จ่ายในช่วงวันที่เลือกอีกครั้งหนึ่งจากกำไรขาย ยังไม่หักค่าใช้จ่ายทั่วไปของร้าน ตารางและกราฟด้านล่างแสดงกำไรก่อนค่าแอดและเป็นภาพรวมทุกช่วงเวลา</p></div>`;
+  return `<div class="panel"><h2>รายงานตามช่วงวันที่</h2><div class="task-filters"><div class="field"><label>ตั้งแต่วันที่</label><input id="report-from" type="date" value="${reportFrom}"></div><div class="field"><label>ถึงวันที่</label><input id="report-to" type="date" value="${reportTo}"></div><button class="btn btn-ghost" id="report-clear">ทุกช่วงเวลา</button><button class="btn btn-primary" id="report-export">ส่งออกช่วงนี้ CSV</button></div><p class="hint" id="report-range-error" role="status"></p><div id="report-range-summary" class="stats range-stats"></div><p class="hint">ค่าแอดอัตโนมัติในรายงานเป็นประมาณการตามงบต่อวัน จนกว่าจะบันทึกยอดจริงแทน ยอดรายรับ–รายจ่ายไม่รวมรายการที่ลบ ยอดขายและ pre-order ที่ยกเลิก รวมถึงเงินรับและเงินคืนที่เกี่ยวข้อง โดยใช้เกณฑ์เดียวกับสรุปรายเดือน ประวัติการรับและคืนเงินยังดูได้จากรายการที่ยกเลิก กำไรจากการขายคิดเฉพาะยอดขายในช่วงนี้ หักต้นทุนสินค้า ค่าส่ง และค่ากลางแล้ว กำไรหลังแอดหักค่าแอดที่จ่ายในช่วงวันที่เลือกอีกครั้งหนึ่งจากกำไรขาย ยังไม่หักค่าใช้จ่ายทั่วไปของร้าน ตารางและกราฟด้านล่างแสดงกำไรก่อนค่าแอดและเป็นภาพรวมทุกช่วงเวลา</p></div>`;
 }
 function wireRangeReport() {
   const from = document.getElementById("report-from"), to = document.getElementById("report-to");
@@ -4433,8 +4450,8 @@ function wireRangeReport() {
     document.getElementById("report-export").disabled = !valid;
     const summary = document.getElementById("report-range-summary");
     if (!valid) { summary.innerHTML = ""; return null; }
-    const stats = cashSummary(transactions, reportFrom, reportTo);
-    summary.innerHTML = metric("เงินรับจริง", fmtMoney(stats.income), `${stats.rows.length} รายการในช่วงนี้`, "up") + metric("เงินจ่ายจริง", fmtMoney(stats.expense), "ต้นทุนซื้อเข้าและค่าใช้จ่าย", "down") + metric("เงินสดสุทธิ", fmtMoney(stats.cash), "เงินรับ − เงินจ่าย", "wallet") + metric("กำไรจากการขาย", fmtMoney(stats.profit), `ขาย ${stats.qty} ชิ้น · ยอดขาย ${fmtMoney(stats.sales)} · ก่อนค่าแอด`, "chart") + metric("ค่าแอดจ่ายในช่วงนี้", fmtMoney(stats.rows.filter(isAdSpend).reduce((sum,tx) => sum + tx.amount,0)), "รวมทุกแคมเปญตามวันที่จ่าย", "down") + metric("กำไรขายหลังหักแอด", fmtMoney(stats.profit - stats.rows.filter(isAdSpend).reduce((sum,tx) => sum + tx.amount,0)), "ค่าแอดลงเงินจ่ายจริงแล้ว ไม่หักเงินสดซ้ำ", "wallet");
+    const stats = cashSummary(activeAccountingTransactions(transactions, preorders), reportFrom, reportTo);
+    summary.innerHTML = metric("รายรับ", fmtMoney(stats.income), `${stats.rows.length} รายการในช่วงนี้`, "up") + metric("รายจ่าย", fmtMoney(stats.expense), "ต้นทุนซื้อเข้าและค่าใช้จ่าย", "down") + metric("ยอดสุทธิ", fmtMoney(stats.cash), "เงินรับ − เงินจ่าย", "wallet") + metric("กำไรจากการขาย", fmtMoney(stats.profit), `ขาย ${stats.qty} ชิ้น · ยอดขาย ${fmtMoney(stats.sales)} · ก่อนค่าแอด`, "chart") + metric("ค่าแอดจ่ายในช่วงนี้", fmtMoney(stats.rows.filter(isAdSpend).reduce((sum,tx) => sum + tx.amount,0)), "รวมทุกแคมเปญตามวันที่จ่าย", "down") + metric("กำไรขายหลังหักแอด", fmtMoney(stats.profit - stats.rows.filter(isAdSpend).reduce((sum,tx) => sum + tx.amount,0)), "ค่าแอดลงเงินจ่ายจริงแล้ว ไม่หักเงินสดซ้ำ", "wallet");
     return stats;
   };
   from.onchange = to.onchange = update;

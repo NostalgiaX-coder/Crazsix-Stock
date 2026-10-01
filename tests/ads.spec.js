@@ -34,7 +34,7 @@ test('campaign creation needs no total budget; recorded spending affects cash an
 test('sale attribution records exactly once and computes net profit and the next ad reserve',async({page})=>{
  const errors=await boot(page,seeded({sales:false}));await nav(page,'sell');
  const card=page.locator('[data-sale-card]').first();await card.locator('.sell-ad-campaign').selectOption('ad-1');await card.locator('.sell-qty').fill('4');
- await expect(card.locator('.sell-ad-preview')).toContainText('ค่าแอดหักจากเครดิต Ads Manager');
+ await expect(card.locator('.sell-ad-preview')).toContainText('20% ของกำไรตามเงินรับหลังแอด');
  await card.locator('.sell-submit').click();await expectSaved(page,db=>db.transactions.some(t=>t.adCampaignId==='ad-1'&&t.category==='ขายสินค้า'));
  const db=await snapshot(page);expect(db.products[0].variants[0].qty).toBe(6);expect(db.transactions.filter(t=>t.category==='ขายสินค้า')).toHaveLength(1);
  expect(db.transactions.find(t=>t.category==='ขายสินค้า')).toMatchObject({adCampaignId:'ad-1',profit:600,stockProductId:'product-1'});

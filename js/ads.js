@@ -46,6 +46,7 @@ export function validateAdCampaign(c) {
     (campaignUntilBudget(c) ? c.endDate === '' : dateValid(c.endDate) && c.endDate >= c.startDate) && (c.budget == null || cash(c.budget)) &&
     (c.dailyBudget == null || (cash(c.dailyBudget) && c.dailyBudget > 0)) &&
     Number.isSafeInteger(c.targetQty) && c.targetQty > 0 && c.targetQty <= 1e9 &&
+    (c.reservePerUnit == null || cash(c.reservePerUnit)) &&
     Number.isFinite(c.reservePercent) && c.reservePercent >= 0 && c.reservePercent <= 100 &&
     textValid(c.note, 2000) && textValid(c.url, 2000) && (!c.url || Boolean(safeAdUrl(c.url)));
 }
@@ -66,9 +67,11 @@ export function adMetrics(c, transactions, today) {
   // For installments, subtract the entire sale cost before reserving any received cash.
   const cashMargin = money(sales.reduce((s, r) => s + r.profit - (r.type === 'installment' ? Math.max(0, r.amount - (r.paidAmount || 0)) : 0), 0));
   const net = money(grossProfit - spend), cashNet = money(cashMargin - spend);
-  const reserve = money(Math.max(0, cashNet) * c.reservePercent / 100);
+  const fixedReserve = money(sales.reduce((sum, tx) => sum + (tx.adReservePerUnit ?? c.reservePerUnit ?? 0) * tx.qty, 0));
+  const percentReserve = c.reservePerUnit == null ? money(Math.max(0, cashNet) * c.reservePercent / 100 * (qty ? sales.filter(tx => tx.adReservePerUnit == null).reduce((sum, tx) => sum + tx.qty, 0) / qty : 0)) : 0;
+  const reserve = money(fixedReserve + percentReserve);
   const days = campaignUntilBudget(c) ? null : daysBetween(c.startDate, c.endDate), daysLeft = days == null ? null : Math.max(0, daysBetween(today < c.startDate ? c.startDate : today, c.endDate));
-  return { sales, expenses, spend, revenue, qty, grossProfit, net, cashNet, reserve, days, daysLeft,
+  return { sales, expenses, spend, revenue, qty, grossProfit, net, cashNet, reserve, fixedReserve, percentReserve, days, daysLeft,
     spentToday: sum(expenses.filter(tx => tx.date === today), 'amount'),
     actualPerUnit: qty ? spend / qty : null,
     roas: spend ? revenue / spend : null, reservePerUnit: qty ? reserve / qty : 0,
@@ -87,6 +90,7 @@ export function productAdMetrics(product, campaigns, transactions, today) {
 export function validateAdsBackup(campaigns, transactions, products) {
   if (!Array.isArray(campaigns) || !campaigns.every(validateAdCampaign) || new Set(campaigns.map(c => c.id)).size !== campaigns.length || campaigns.some(c => campaignProductIds(c).some(id => !products.some(p => p.id === id)))) return false;
   return transactions.every(tx => {
+    if (tx.adReservePerUnit != null && (!cash(tx.adReservePerUnit) || !cash(money(tx.adReservePerUnit * tx.qty)) || !tx.adCampaignId || !(isAdSale(tx) || (tx.deliveryStatus === 'cancelled' && isAdSale({...tx,category:'ขายสินค้า'}))))) return false;
     if (tx.adAutomatic != null && (tx.adAutomatic !== true || !isAdSpend(tx) || tx.adWalletFunded !== true || tx.id !== 'ad-auto-'+tx.adCampaignId+'-'+tx.date)) return false;
     if (tx.adWalletFunded != null && (typeof tx.adWalletFunded !== 'boolean' || !isAdSpend(tx))) return false;
     if (!tx.adCampaignId) return tx.adCampaignId == null && tx.adAllocations == null;
@@ -210,6 +214,8 @@ export function applyAdAction(state, action, id, today) {
       if (removed.some(p => transactions.some(tx => tx.adCampaignId === campaign.id &&
         ((isAdSpend(tx) && adSpendAllocations(tx,campaign).some(a => a.productId === p.id)) || saleMatchesProduct(tx,p) || (tx.deliveryStatus === "cancelled" && saleMatchesProduct({...tx,category:"ขายสินค้า"},p))))))
         throw new Error('สินค้าที่มีต้นทุนหรือยอดขายผูกอยู่แล้วไม่สามารถนำออกได้ แต่เพิ่มสินค้าอื่นได้');
+      // Preserve the reserve rate already attached to historical sales before changing it.
+      if (campaign.reservePerUnit != null) transactions.filter(tx => tx.adCampaignId === campaign.id && tx.adReservePerUnit == null && (isAdSale(tx) || tx.deliveryStatus === 'cancelled')).forEach(tx => { tx.adReservePerUnit = campaign.reservePerUnit; });
       // Freeze historical shares before adding products, including old single-product campaigns.
       transactions.filter(tx => tx.adCampaignId === campaign.id && isAdSpend(tx) && !tx.adAllocations).forEach(tx => { tx.adAllocations = adSpendAllocations(tx,campaign); });
     }
@@ -225,6 +231,10 @@ export function applyAdAction(state, action, id, today) {
       const product = selectedProducts.find(p => saleMatchesProduct(tx,p));
       if (!product || tx.adCampaignId) throw new Error('เลือกยอดขายของสินค้านี้ที่ยังไม่ผูกกับแคมเปญอื่น');
       tx.adCampaignId = campaign.id;
+      if (campaign.reservePerUnit != null) {
+        if (!cash(money(campaign.reservePerUnit * tx.qty))) throw new Error("ยอดแบ่งยิงแอดรวมสูงเกินกำหนด");
+        tx.adReservePerUnit = campaign.reservePerUnit;
+      }
       tx.stockProductId = product.id;
     } else {
       if (tx.adCampaignId !== campaign.id) throw new Error('รายการนี้ไม่ได้ผูกกับแคมเปญ');
@@ -235,6 +245,7 @@ export function applyAdAction(state, action, id, today) {
       } else {
         if (!isAdSale(tx)) throw new Error('รายการนี้ไม่ใช่ยอดขาย');
         delete tx.adCampaignId;
+        delete tx.adReservePerUnit;
       }
     }
   } else if (action.type === 'delete') {
