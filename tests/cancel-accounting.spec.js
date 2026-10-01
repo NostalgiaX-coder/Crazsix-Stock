@@ -19,6 +19,9 @@ for (const partial of [false, true]) test(`pending cancellation adjusts shared p
   let db = await snapshot(page);
   expect(db.products).toEqual(state.products);
   expect(db.transactions.find(tx => tx.id === 'purchase')).toMatchObject({ amount: partial ? 260 : 100, pendingIds: ['pending-b'] });
+  await nav(page, 'tx');
+  await expect(page.locator('tr').filter({ has: page.locator('[data-txdel="purchase"]') })).toContainText(partial ? '฿260' : '฿100');
+  await nav(page, 'stock'); await page.locator('[data-workspace-tab="pending"]').click();
   await cancel(page, 'pending-b');
   await expectSaved(page, db => db.pendingOrders.length === 0);
   db = await snapshot(page);
@@ -49,4 +52,19 @@ test('pending cancellation requires fresh confirmation if the purchase changes',
   await expect(page.locator('#modal-message')).toContainText('เปลี่ยนแปลง');
   expect((await snapshot(page)).pendingOrders).toHaveLength(2);
   expect((await snapshot(page)).transactions[0].amount).toBe(400);
+});
+
+test('cancelling an entire pending purchase removes its ledger row and expense totals', async ({ page }) => {
+  const state = seed();
+  state.pendingOrders = [state.pendingOrders[0]];
+  state.transactions = [{ ...state.transactions[0], amount: 240, pendingIds: ['pending-a'] }];
+  await boot(page, state); await nav(page, 'tx');
+  await expect(page.locator('tr').filter({ has: page.locator('[data-txdel="purchase"]') })).toContainText('฿240');
+  await nav(page, 'stock'); await page.locator('[data-workspace-tab="pending"]').click();
+  await cancel(page, 'pending-a');
+  await expectSaved(page, db => db.pendingOrders.length === 0 && db.transactions.length === 0);
+  await nav(page, 'tx'); await expect(page.locator('[data-txdel="purchase"]')).toHaveCount(0);
+  await nav(page, 'home'); await expect(page.locator('.expense-stat')).toContainText('฿0');
+  await nav(page, 'report'); await expect(page.locator('#report-range-summary .val').nth(1)).toHaveText('฿0');
+  expect((await snapshot(page)).products).toEqual(state.products);
 });

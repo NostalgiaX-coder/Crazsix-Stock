@@ -1122,6 +1122,7 @@ async function deletePendingOrder(pendingId) {
   pendingOrders = pendingOrders.filter((p) => p.id !== pendingId);
   await saveData("pendingOrders", "transactions");
   render();
+  toast("ยกเลิกรายการรอรับและนำยอดที่ยกเลิกออกจากรายรับ–รายจ่ายแล้ว");
 }
 
 // เติมหลายตัวในล็อตเดียว โดยคิดต้นทุนเฉลี่ยถ่วงน้ำหนักให้แต่ละตัวเลือก
