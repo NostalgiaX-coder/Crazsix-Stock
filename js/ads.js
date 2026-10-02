@@ -220,6 +220,13 @@ export function applyAdAction(state, action, id, today) {
       transactions.filter(tx => tx.adCampaignId === campaign.id && isAdSpend(tx) && !tx.adAllocations).forEach(tx => { tx.adAllocations = adSpendAllocations(tx,campaign); });
     }
     campaigns = campaign ? campaigns.map(c => c.id === campaign.id ? next : c) : [next, ...campaigns];
+  } else if (action.type === 'toggle') {
+    if (typeof action.enabled !== 'boolean') throw new Error('สถานะเปิด–ปิดไม่ถูกต้อง');
+    if (action.enabled && !(campaign.dailyBudget > 0)) throw new Error('กรุณาระบุงบยิงแอดต่อวันในรายละเอียดก่อนเปิดหักเงิน');
+    ensureAutoHistory(campaign,wallet,today);
+    campaign.status = action.enabled ? 'active' : 'paused';
+    campaign.autoDeduct = action.enabled;
+    campaign.autoHistory = [...(campaign.autoHistory || []).filter(h=>h.date<today),autoSnapshot(campaign,wallet,today)];
   } else if (action.type === 'spend') {
     if (action.adWalletFunded != null && typeof action.adWalletFunded !== 'boolean') throw new Error('แหล่งชำระค่าแอดไม่ถูกต้อง');
     if (!cash(action.amount) || action.amount <= 0 || !dateValid(action.date) || action.date > today || !textValid(action.note, 500)) throw new Error('ระบุค่าแอดที่จ่ายจริงมากกว่า 0 และวันที่จ่ายไม่เกินวันนี้');

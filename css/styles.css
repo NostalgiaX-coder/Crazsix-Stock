@@ -2708,3 +2708,17 @@ html { background: var(--bg); }
   .shipment-pending-row .field { max-width: 150px; margin-left: 25px; }
   .shipment-history-card .section-heading, .ad-daily-section .section-heading { flex-wrap: wrap; gap: 8px; }
 }
+
+/* Campaign controls stay visible while the detailed ledger is collapsed. */
+.ad-card-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.ad-card-body[hidden] { display: none; }
+.ad-toggle { display: inline-flex; align-items: center; gap: 8px; padding: 8px 4px; border: 0; background: transparent; color: inherit; font: inherit; font-weight: 700; cursor: pointer; }
+.ad-toggle-track { width: 42px; height: 24px; border-radius: 20px; background: #64748b; position: relative; transition: background .15s; }
+.ad-toggle-track::after { content: ''; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: white; transition: transform .15s; }
+.ad-toggle[aria-checked="true"] .ad-toggle-track { background: #16834a; }
+.ad-toggle[aria-checked="true"] .ad-toggle-track::after { transform: translateX(18px); }
+.ad-toggle:disabled { opacity: .55; cursor: wait; }
+.ad-toggle:focus-visible, .ad-expand:focus-visible { outline: 2px solid var(--primary, #2563eb); outline-offset: 4px; }
+.ad-expand [data-ad-arrow] { font-size: 20px; line-height: 1; }
+.ad-deduction-status { margin: 10px 0 0; }
+.ad-card-body > .ad-card-actions { margin: 14px 0; }

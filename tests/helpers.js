@@ -82,3 +82,10 @@ async function expectSaved(page, check) {
 }
 
 module.exports = { boot, nav, radio, inventory, snapshot, expectSaved, today };
+
+// Open the compact campaign cards before exercising their detailed workflows.
+async function expandAds(page) {
+  const buttons = page.locator('[data-ad-expand][aria-expanded="false"]:visible');
+  while (await buttons.count()) await buttons.first().click();
+}
+module.exports.expandAds = expandAds;
