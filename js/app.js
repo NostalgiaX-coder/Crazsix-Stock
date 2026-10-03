@@ -1444,7 +1444,24 @@ async function recordInstallmentPayment(saleTxId, amountStr) {
   return true;
 }
 
+async function commitAdAction(action) {
+  if (savingStores.size) return false;
+  const next = applyAdAction(storeValues(), action, uid(), todayStr());
+  adCampaigns = next.adCampaigns; adWallet = next.adWallet; transactions = next.transactions;
+  await saveData("adCampaigns", "transactions", "products", "adWallet");
+  return true;
+}
+
 async function addManualTx(data) {
+  if (editingTransaction && isAdSpend(editingTransaction)) {
+    try {
+      const campaign = adCampaigns.find(c=>c.id===editingTransaction.adCampaignId);
+      if (!await commitAdAction({type:'editSpend',campaignId:campaign?.id,expected:editingAdCampaign,
+        transactionId:editingTransaction.id,expectedTransaction:JSON.stringify(editingTransaction),amount:data.amount,desc:data.desc})) return;
+      editingTransaction=null; editingAdCampaign=null; render();
+    } catch(error) { if (!error.storageReported) showAlert(error.message); }
+    return;
+  }
   if (
     !validCash(data.amount) ||
     data.amount <= 0 ||
@@ -1508,7 +1525,11 @@ async function deleteTx(id) {
     return;
   }
   if (isAdSpend(target)) {
-    showAlert("รายการค่าแอดผูกกับแคมเปญ กรุณาแก้ไขจากเมนูยิงแอดเพื่อให้ต้นทุนและกำไรตรงกัน");
+    const campaign=adCampaigns.find(c=>c.id===target.adCampaignId);
+    const action={type:'removeSpend',campaignId:campaign?.id,expected:JSON.stringify(campaign),transactionId:id,expectedTransaction:JSON.stringify(target)};
+    if (!await showConfirm(`ลบค่าแอด ${fmtMoney(target.amount)} วันที่ ${target.date}? ${target.adWalletFunded ? 'คืนยอดนี้เข้าเครดิต Ads Manager ในระบบร้าน' : 'รายการจ่ายตรงนี้ไม่กระทบเครดิต Ads Manager'} และไม่หักอัตโนมัติซ้ำสำหรับแคมเปญนี้ในวันที่ของรายการนี้`)) return;
+    try { if(await commitAdAction(action)) { editingTransaction=null; editingAdCampaign=null; render(); } }
+    catch(error) { if (!error.storageReported) showAlert(error.message); }
     return;
   }
   if (target.preorderId) {
@@ -1646,6 +1667,7 @@ let homeFilter = "all";
 let sellSearch = "";
 let txSearch = "";
 let editingTransaction = null;
+let editingAdCampaign = null;
 let txTypeFilter = "all";
 let txMonthFilter = "";
 function icon(name, extra = "") {
@@ -3681,7 +3703,7 @@ function renderTxTab() {
       <td>${escapeHtml(t.category || "")}</td>
       <td>${escapeHtml(t.desc || "")}${t.deliveryStatus ? `<span class="tag preorder">${deliveryLabels[t.deliveryStatus] || ""}</span>` : ""}</td>
       <td class="num" style="color:${t.type === "income" ? "var(--green)" : ["installment", "preorder"].includes(t.type) ? "var(--navy-3)" : "var(--red)"}">${t.type === "income" ? "+" : ["installment", "preorder"].includes(t.type) ? "" : "−"}${fmtMoney(t.amount)}</td>
-      <td>${isManualTransaction(t) ? `<button class="btn btn-ghost btn-sm" data-txedit="${escapeHtml(t.id)}">แก้ไข</button>` : ""}<button class="${t.preorderId ? "btn btn-ghost btn-sm" : "btn-danger"}" data-txdel="${escapeHtml(t.id)}" ${t.preorderId ? 'title="จัดการจากหน้า Pre-order ลูกค้า"' : ""}>${t.preorderId ? "ดู pre-order" : "ลบ"}</button></td>
+      <td>${isManualTransaction(t) || isAdSpend(t) ? `<button class="btn btn-ghost btn-sm" data-txedit="${escapeHtml(t.id)}">แก้ไข</button>` : ""}<button class="${t.preorderId ? "btn btn-ghost btn-sm" : "btn-danger"}" data-txdel="${escapeHtml(t.id)}" ${t.preorderId ? 'title="จัดการจากหน้า Pre-order ลูกค้า"' : ""}>${t.preorderId ? "ดู pre-order" : "ลบ"}</button></td>
     </tr>
   `,
     )
@@ -3690,7 +3712,7 @@ function renderTxTab() {
   return `
     <div class="panel">
       <h2>${editingTransaction ? "แก้ไขรายการบัญชี" : "บันทึกรายการรายรับ-รายจ่ายเพิ่มเติม"}</h2>
-      <p class="hint">สำหรับค่าใช้จ่ายอื่นๆ ที่ไม่ใช่ต้นทุนสินค้า เช่น ค่าเช่า ค่าขนส่ง หรือรายรับอื่น</p>
+      <p class="hint">${editingTransaction && isAdSpend(editingTransaction) ? "แก้ไขยอดค่าแอดและรายละเอียดได้ ยอดที่ลดลงจะคืนเข้าเครดิตในระบบร้านเฉพาะรายการที่หักเครดิตไว้ ประเภท หมวดหมู่ และวันที่คงเดิม หากต้องการยกเลิกทั้งยอดให้ลบรายการ" : "สำหรับค่าใช้จ่ายอื่นๆ ที่ไม่ใช่ต้นทุนสินค้า เช่น ค่าเช่า ค่าขนส่ง หรือรายรับอื่น"}</p>
       <form id="add-tx-form">
         <div class="form-grid">
           <div class="field">
@@ -3801,13 +3823,17 @@ function wireTxTab() {
   const f = document.getElementById("add-tx-form");
   if (f && editingTransaction) {
     ["type", "category", "desc", "amount", "date"].forEach(key => { f.elements.namedItem(key).value = editingTransaction[key] ?? ""; });
+    if (isAdSpend(editingTransaction)) {
+      ["type","category","date"].forEach(key=>{f.elements.namedItem(key).disabled=true;});
+      f.elements.namedItem('desc').maxLength=2000;
+    }
     document.getElementById("tx-cancel-edit").onclick = () => { editingTransaction = null; render(); };
   }
   document.querySelectorAll("[data-txedit]").forEach(button => {
     button.onclick = () => {
       const tx = transactions.find(item => item.id === button.dataset.txedit);
-      if (!tx || !isManualTransaction(tx)) return;
-      editingTransaction = copyData(tx); render();
+      if (!tx || (!isManualTransaction(tx) && !isAdSpend(tx))) return;
+      editingTransaction = copyData(tx); editingAdCampaign=JSON.stringify(adCampaigns.find(c=>c.id===tx.adCampaignId)); render();
       document.querySelector('#add-tx-form [name="amount"]').focus();
     };
   });
@@ -3822,7 +3848,7 @@ function wireTxTab() {
       }
       addManualTx({
         type: fd.get("type"),
-        category: fd.get("category").trim(),
+        category: (fd.get("category") || "").trim(),
         desc: fd.get("desc").trim(),
         amount,
         date: fd.get("date") || todayStr(),
@@ -4525,13 +4551,7 @@ function wireAdsTab() {
     today: todayStr(), fmt: fmtMoney, confirm: showConfirm, alert: showAlert, csv: downloadCsv,
     openProduct: openProductAggDetail,
     commit: async action => {
-      if (savingStores.size) return;
-      const next = applyAdAction(storeValues(), action, uid(), todayStr());
-      adCampaigns = next.adCampaigns;
-      adWallet = next.adWallet;
-      transactions = next.transactions;
-      await saveData("adCampaigns", "transactions", "products", "adWallet");
-      render();
+      if (await commitAdAction(action)) render();
     },
   });
 }

@@ -39,7 +39,7 @@ export function allocateAdSpend(amount, ids) {
 }
 export const adSpendAllocations = (tx, c) => tx.adAllocations || allocateAdSpend(tx.amount, campaignProductIds(c));
 export function validateAdCampaign(c) {
-  return c && validAutoHistory(c) && textValid(c.id, 100, true) && !/[\s<>"'&]/.test(c.id) && textValid(c.productId, 100, true) &&
+  return c && validAdCorrections(c) && validAutoHistory(c) && textValid(c.id, 100, true) && !/[\s<>"'&]/.test(c.id) && textValid(c.productId, 100, true) &&
     (c.productIds == null || (Array.isArray(c.productIds) && c.productIds.length > 0 && c.productIds[0] === c.productId && new Set(c.productIds).size === c.productIds.length && c.productIds.every(id => textValid(id, 100, true)))) &&
     textValid(c.name, 120, true) && textValid(c.channel, 80, true) && Object.hasOwn(adStatuses, c.status) &&
     dateValid(c.startDate) && (c.runMode == null || ['dated', 'until_budget'].includes(c.runMode)) &&
@@ -98,7 +98,7 @@ export function validateAdsBackup(campaigns, transactions, products) {
     if (!c) return false;
     if (tx.adAutomatic) {
       const h=c.autoHistory?.filter(h=>h.date<=tx.date).at(-1);
-      if (!h || !h.enabled || h.status!=='active' || tx.date<h.startDate || (h.runMode==='dated' && tx.date>h.endDate) || tx.amount>h.dailyBudget) return false;
+      if (c.autoExcludedDates?.includes(tx.date) || !h || !h.enabled || h.status!=='active' || tx.date<h.startDate || (h.runMode==='dated' && tx.date>h.endDate) || tx.amount>h.dailyBudget) return false;
     }
     if (isAdSpend(tx)) {
       const a = tx.adAllocations;
@@ -117,6 +117,10 @@ const autoSnapshot = (c, wallet, date) => ({date, startDate:c.startDate, endDate
   enabled:c.autoDeduct !== false, productIds:campaignProductIds(c)});
 function ensureAutoHistory(c, wallet, today) {
   if (!c.autoHistory && c.dailyBudget > 0) c.autoHistory=[autoSnapshot(c,wallet,c.startDate < today ? c.startDate : today)];
+}
+function validAdCorrections(c) {
+  return (c.autoExcludedDates == null || (Array.isArray(c.autoExcludedDates) && c.autoExcludedDates.every(dateValid) && new Set(c.autoExcludedDates).size === c.autoExcludedDates.length)) &&
+    (c.creditAdjustments == null || (Array.isArray(c.creditAdjustments) && c.creditAdjustments.every(a => a && dateValid(a.date) && dateValid(a.appliedDate) && a.appliedDate >= a.date && Number.isFinite(a.amount) && cash(Math.abs(a.amount)))));
 }
 function validAutoHistory(c) {
   return (c.autoDeduct == null || typeof c.autoDeduct === 'boolean') && (c.autoHistory == null ||
@@ -146,7 +150,18 @@ export function reconcileAutomaticAds(state, today) {
     const add=(map,key,value)=>map.set(key,money((map.get(key)||0)+value));
     wallet.forEach(e=>add(deposits,e.date,e.amount));
     actual.filter(isAdSpend).forEach(tx=>{if(tx.adWalletFunded)add(payments,tx.date,tx.amount);manualDays.add(tx.adCampaignId+'|'+tx.date);});
-    let credit=money(wallet.filter(e=>e.date<start).reduce((s,e)=>s+e.amount,0)-actual.filter(tx=>isAdSpend(tx)&&tx.adWalletFunded&&tx.date<start).reduce((s,tx)=>s+tx.amount,0));
+    // Refunds become available on the correction date, not on the old expense date.
+    // This keeps other historical automatic charges from absorbing a refund.
+    let priorAdjustments=0;
+    campaigns.forEach(c=>{
+      (c.autoExcludedDates || []).forEach(date=>manualDays.add(c.id+'|'+date));
+      (c.creditAdjustments || []).forEach(a=>{
+        add(payments,a.date,a.amount); add(payments,a.appliedDate,-a.amount);
+        if(a.date<start) priorAdjustments+=a.amount;
+        if(a.appliedDate<start) priorAdjustments-=a.amount;
+      });
+    });
+    let credit=money(-priorAdjustments+wallet.filter(e=>e.date<start).reduce((s,e)=>s+e.amount,0)-actual.filter(tx=>isAdSpend(tx)&&tx.adWalletFunded&&tx.date<start).reduce((s,tx)=>s+tx.amount,0));
     for(let timestamp=Date.parse(start);timestamp<Date.parse(today);timestamp+=86400000) {
       const date=new Date(timestamp).toISOString().slice(0,10);
       credit=money(credit+(deposits.get(date)||0)-(payments.get(date)||0));
@@ -205,6 +220,8 @@ export function applyAdAction(state, action, id, today) {
     delete next.autoHistory;
     delete next.budget;
     if(campaign) {
+      if (campaign.autoExcludedDates) next.autoExcludedDates = campaign.autoExcludedDates;
+      if (campaign.creditAdjustments) next.creditAdjustments = campaign.creditAdjustments;
       ensureAutoHistory(campaign,wallet,today);
       if(campaign.autoHistory) next.autoHistory=[...campaign.autoHistory.filter(h=>h.date<today),autoSnapshot(next,wallet,today)];
     }
@@ -231,7 +248,27 @@ export function applyAdAction(state, action, id, today) {
     if (action.adWalletFunded != null && typeof action.adWalletFunded !== 'boolean') throw new Error('แหล่งชำระค่าแอดไม่ถูกต้อง');
     if (!cash(action.amount) || action.amount <= 0 || !dateValid(action.date) || action.date > today || !textValid(action.note, 500)) throw new Error('ระบุค่าแอดที่จ่ายจริงมากกว่า 0 และวันที่จ่ายไม่เกินวันนี้');
     transactions.unshift({ id, adCampaignId: campaign.id, adWalletFunded:action.adWalletFunded === true, type: 'expense', category: 'ค่าโฆษณาสินค้า', amount: action.amount, date: action.date, adAllocations: allocateAdSpend(action.amount, selectedIds), desc: `${campaign.name} · ${selectedProducts.map(p => p.name).join(', ')}${action.note ? ' · ' + action.note : ''}` });
-  } else if (['link', 'unlink', 'removeSpend'].includes(action.type)) {
+  } else if (['editSpend', 'removeSpend'].includes(action.type)) {
+    const tx = transactions.find(t => t.id === action.transactionId);
+    if (!tx || JSON.stringify(tx) !== action.expectedTransaction) throw new Error('รายการบัญชีเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุด');
+    if (!isAdSpend(tx) || tx.adCampaignId !== campaign.id) throw new Error('รายการนี้ไม่ใช่ค่าแอดของแคมเปญ');
+    const amount = action.type === 'removeSpend' ? 0 : action.amount;
+    if (!cash(amount) || (action.type === 'editSpend' && (amount <= 0 || !textValid(action.desc,2000)))) throw new Error('ระบุค่าแอดมากกว่า 0 ทศนิยมไม่เกิน 2 ตำแหน่ง และรายละเอียดไม่เกิน 2000 ตัวอักษร');
+    campaign.autoExcludedDates = [...new Set([...(campaign.autoExcludedDates || []),tx.date])].sort();
+    const difference = tx.adWalletFunded ? money(tx.amount-amount) : 0;
+    if (difference) campaign.creditAdjustments = [...(campaign.creditAdjustments || []),{date:tx.date,appliedDate:today,amount:difference}];
+    if (action.type === 'removeSpend') transactions = transactions.filter(t=>t.id!==tx.id);
+    else {
+      const shares=adSpendAllocations(tx,campaign).map(a=>{
+        const exact=amount*100*a.amount/tx.amount;
+        return {productId:a.productId,cents:Math.floor(exact),remainder:exact-Math.floor(exact)};
+      }).sort((a,b)=>b.remainder-a.remainder || a.productId.localeCompare(b.productId));
+      const remaining=Math.round(amount*100)-shares.reduce((sum,a)=>sum+a.cents,0);
+      tx.adAllocations=shares.map((a,i)=>({productId:a.productId,amount:(a.cents+(i<remaining?1:0))/100}));
+      tx.amount=amount; tx.desc=action.desc;
+      delete tx.adAutomatic;
+    }
+  } else if (['link', 'unlink'].includes(action.type)) {
     const tx = transactions.find(t => t.id === action.transactionId);
     if (!tx || JSON.stringify(tx) !== action.expectedTransaction) throw new Error('รายการบัญชีเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุด');
     if (action.type === 'link') {
@@ -245,17 +282,12 @@ export function applyAdAction(state, action, id, today) {
       tx.stockProductId = product.id;
     } else {
       if (tx.adCampaignId !== campaign.id) throw new Error('รายการนี้ไม่ได้ผูกกับแคมเปญ');
-      if (action.type === 'removeSpend') {
-        if (!isAdSpend(tx)) throw new Error('รายการนี้ไม่ใช่ค่าแอด');
-        if (tx.adAutomatic) throw new Error('รายการนี้คำนวณอัตโนมัติ ให้บันทึกยอดใช้จริงของวันนั้นแทน หรือปรับการหักอัตโนมัติในแคมเปญ');
-        transactions = transactions.filter(t => t.id !== tx.id);
-      } else {
-        if (!isAdSale(tx)) throw new Error('รายการนี้ไม่ใช่ยอดขาย');
-        delete tx.adCampaignId;
-        delete tx.adReservePerUnit;
-      }
+      if (!isAdSale(tx)) throw new Error('รายการนี้ไม่ใช่ยอดขาย');
+      delete tx.adCampaignId;
+      delete tx.adReservePerUnit;
     }
   } else if (action.type === 'delete') {
+    if (campaign.autoExcludedDates?.length || campaign.creditAdjustments?.length) throw new Error('แคมเปญมีประวัติแก้ไขค่าแอดแล้ว ให้เปลี่ยนสถานะเพื่อเก็บประวัติ');
     if (wallet.some(e=>e.campaignId===campaign.id)) throw new Error('แคมเปญมีประวัติเติมเงินแล้ว ให้เปลี่ยนสถานะเพื่อเก็บประวัติ');
     if (transactions.some(tx => tx.adCampaignId === campaign.id)) throw new Error('แคมเปญมีค่าใช้จ่ายหรือยอดขายแล้ว ให้เปลี่ยนสถานะเป็นจบแคมเปญเพื่อเก็บประวัติ');
     campaigns = campaigns.filter(c => c.id !== campaign.id);

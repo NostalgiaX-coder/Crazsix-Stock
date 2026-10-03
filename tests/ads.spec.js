@@ -98,8 +98,8 @@ test('campaign backup round trips; malformed amounts, URLs and dangling attribut
  }
 });
 
-test('ad expense is protected in general ledger and campaigns with history cannot be deleted',async({page})=>{
- await boot(page,seeded());await nav(page,'tx');await page.locator('[data-txdel="spend-1"]').click();await expect(page.locator('#modal-message')).toContainText('เมนูยิงแอด');await page.locator('#modal-ok-btn').click();
+test('ad expense deletion explains credit refund and campaigns with history cannot be deleted',async({page})=>{
+ await boot(page,seeded());await nav(page,'tx');await page.locator('[data-txdel="spend-1"]').click();await expect(page.locator('#modal-message')).toContainText('ไม่หักอัตโนมัติซ้ำ');await page.locator('#modal-cancel-btn').click();
  await nav(page,'ads');await expandAds(page);await expandAds(page);await page.locator('.ad-edit-details > summary').click();await page.locator('[data-ad-delete]').click();await page.locator('#modal-ok-btn').click();await expect(page.locator('#modal-message')).toContainText('มีค่าใช้จ่ายหรือยอดขาย');expect((await snapshot(page)).adCampaigns).toHaveLength(1);
 });
 
