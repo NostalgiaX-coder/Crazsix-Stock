@@ -2440,12 +2440,23 @@ function renderStockRows(groups) {
         0,
       );
       const averageCost = totalQty ? totalValue / totalQty : 0;
+      const incomingOptions = new Map();
+      for (const order of group.pendingOrders) {
+        const key = stockOptionKey(order);
+        const option = incomingOptions.get(key) || { ...order, qty: 0 };
+        option.qty += order.qty;
+        incomingOptions.set(key, option);
+      }
+      const pendingDetails = [...incomingOptions.values()].map(order =>
+        `<div class="stock-pending-option">สี ${escapeHtml(order.color || "-")} · ไซส์ ${escapeHtml(order.size || "-")} · ${order.type === "new" ? "มือ1" : "มือ2"}${measurementLabel(order) ? ` · ${escapeHtml(measurementLabel(order))}` : ""}<strong>รอรับ ${order.qty} ชิ้น</strong></div>`
+      ).join("");
       const sizeRows = group.variants
         .map(({ variant: v }) => {
+          const pendingQty = incomingOptions.get(stockOptionKey(v))?.qty || 0;
           const isSoldOut = v.qty <= 0;
           return `
       <div class="stock-size-item ${isSoldOut ? "soldout-item" : ""}" data-stock-variant="${escapeHtml(v.id)}">
-        <span>ไซส์ ${escapeHtml(v.size || "-")} · ${v.type === "new" ? "มือ1" : "มือ2"} · ${isSoldOut ? "สินค้าหมด" : v.qty + " ชิ้น"}${renderMeasurementDetails(v)}</span>
+        <span>ไซส์ ${escapeHtml(v.size || "-")} · ${v.type === "new" ? "มือ1" : "มือ2"} · ${isSoldOut ? "สินค้าหมด" : "คงเหลือ " + v.qty + " ชิ้น"}<span class="stock-size-pending">รอรับ ${pendingQty} ชิ้น</span>${renderMeasurementDetails(v)}</span>
         <span>${fmtMoney(v.cost)}</span>
         <button class="btn btn-ghost btn-sm" data-edit="${v.id}">แก้ไข</button>
         <button class="btn-danger" data-del="${v.id}">ลบ</button>
@@ -2461,7 +2472,7 @@ function renderStockRows(groups) {
       <td>${escapeHtml(group.color)}</td>
       <td class="stock-size-list">${sizeRows}</td>
       <td class="num">${totalQty}</td>
-      <td class="num" data-stock-pending>${group.pendingQty || 0}</td>
+      <td class="stock-pending-cell"><span class="stock-pending-total">รวม <strong data-stock-pending>${group.pendingOrders.reduce((sum, order) => sum + order.qty, 0)}</strong> ชิ้น</span>${pendingDetails}</td>
       <td class="num">${fmtMoney(averageCost)}</td>
       <td class="num">${fmtMoney(totalValue)}</td>
     </tr>`;
@@ -2475,16 +2486,16 @@ function renderStockTab() {
     groups
       .map((group) => ({
         ...group,
-        pendingQty: pendingOrders.reduce((sum, order) => {
+        pendingOrders: pendingOrders.filter((order) => {
           const productName = products.find(product => product.id === order.productId)?.name || order.name;
           if (normalizedText(productName) !== normalizedText(group.name) ||
-              normalizedText(order.color) !== normalizedText(group.variants[0].variant.color)) return sum;
+              normalizedText(order.color) !== normalizedText(group.variants[0].variant.color)) return false;
           // Keep each order in one section, including orders for a new size.
           const matching = group.variants.find(({ product, variant }) =>
             (!order.productId || product.id === order.productId) && stockOptionKey(variant) === stockOptionKey(order));
           const belongsToAvailable = matching ? matching.variant.qty > 0 : group.variants.some(({ variant }) => variant.qty > 0);
-          return belongsToAvailable === inStock ? sum + order.qty : sum;
-        }, 0),
+          return belongsToAvailable === inStock;
+        }),
         variants: group.variants.filter(({ variant }) =>
           inStock ? variant.qty > 0 : variant.qty <= 0,
         ),

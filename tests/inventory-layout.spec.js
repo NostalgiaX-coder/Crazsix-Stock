@@ -132,6 +132,11 @@ test('incoming stock counts only unreceived orders in the matching color and sto
   const soldout = page.locator('[data-stock-section="soldout"]');
   await expect(available.locator('th').nth(5)).toHaveText('สั่งซื้อรอรับ');
   await expect(available.locator('[data-stock-pending]')).toHaveText('6');
+  await expect(available.locator('[data-stock-variant="available-variant"] .stock-size-pending')).toHaveText('รอรับ 4 ชิ้น');
+  await expect(available.locator('.stock-pending-option').filter({ hasText: 'ไซส์ M' })).toContainText('รอรับ 4 ชิ้น');
+  await expect(available.locator('.stock-pending-option').filter({ hasText: 'ไซส์ XL' })).toContainText('รอรับ 2 ชิ้น');
+  await expect(soldout.locator('[data-stock-variant="soldout-new"] .stock-size-pending')).toHaveText('รอรับ 4 ชิ้น');
+  await expect(soldout.locator('[data-stock-variant="soldout-used"] .stock-size-pending')).toHaveText('รอรับ 0 ชิ้น');
   await expect(soldout.locator('tr').filter({ has: page.locator('[data-edit="soldout-new"]') }).locator('[data-stock-pending]')).toHaveText('4');
   await expect(soldout.locator('tr').filter({ has: page.locator('[data-edit="soldout-used"]') }).locator('[data-stock-pending]')).toHaveText('0');
   await page.locator('[data-workspace-tab="pending"]').click();
@@ -141,6 +146,7 @@ test('incoming stock counts only unreceived orders in the matching color and sto
   await expectSaved(page, db => db.pendingOrders.find(order => order.id === 'incoming-m').qty === 1);
   await page.locator('[data-workspace-tab="inventory"]').click();
   await expect(available.locator('[data-stock-pending]')).toHaveText('4');
+  await expect(available.locator('[data-stock-variant="available-variant"] .stock-size-pending')).toHaveText('รอรับ 2 ชิ้น');
   await expect(available.locator('tbody tr td').nth(4)).toHaveText('7');
   expect(errors).toEqual([]);
 });

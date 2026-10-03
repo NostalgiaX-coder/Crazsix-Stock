@@ -2722,3 +2722,9 @@ html { background: var(--bg); }
 .ad-expand [data-ad-arrow] { font-size: 20px; line-height: 1; }
 .ad-deduction-status { margin: 10px 0 0; }
 .ad-card-body > .ad-card-actions { margin: 14px 0; }
+
+.stock-size-pending { display: block; margin-top: 4px; font-weight: 600; color: var(--navy); }
+.stock-pending-cell { min-width: 170px; }
+.stock-pending-total { display: block; text-align: right; }
+.stock-pending-option { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.6; }
+.stock-pending-option strong { display: block; color: var(--navy); }
