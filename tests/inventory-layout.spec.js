@@ -114,3 +114,33 @@ test('mobile shipping controls remain visible and within the viewport after sear
   await page.locator('#attach-ship-search').clear();
   expect(await row.evaluate(element => getComputedStyle(element).display)).toBe('grid');
 });
+
+test('incoming stock counts only unreceived orders in the matching color and stock section', async ({ page }) => {
+  const seed = mixedStock();
+  const pending = { name: 'เสื้อ Crazsix', color: 'ดำ', size: 'M', type: 'new', cost: 100, price: 250, orderDate: today() };
+  seed.pendingOrders = [
+    { ...pending, id: 'incoming-m', qty: 3, originalQty: 8, receivedQty: 5 },
+    { ...pending, id: 'incoming-l', size: 'L', qty: 4 },
+    { ...pending, id: 'incoming-xl', size: 'XL', qty: 2 },
+    { ...pending, id: 'incoming-other', name: 'สินค้าอื่น', qty: 90 },
+    { ...pending, id: 'incoming-white', color: 'ขาว', qty: 80 },
+    { ...pending, id: 'incoming-linked', name: 'ชื่อก่อนเปลี่ยน', productId: 'product-1', qty: 1 }
+  ];
+  const errors = await boot(page, seed);
+  await nav(page, 'stock');
+  const available = page.locator('[data-stock-section="available"]');
+  const soldout = page.locator('[data-stock-section="soldout"]');
+  await expect(available.locator('th').nth(5)).toHaveText('สั่งซื้อรอรับ');
+  await expect(available.locator('[data-stock-pending]')).toHaveText('6');
+  await expect(soldout.locator('tr').filter({ has: page.locator('[data-edit="soldout-new"]') }).locator('[data-stock-pending]')).toHaveText('4');
+  await expect(soldout.locator('tr').filter({ has: page.locator('[data-edit="soldout-used"]') }).locator('[data-stock-pending]')).toHaveText('0');
+  await page.locator('[data-workspace-tab="pending"]').click();
+  await page.locator('.pending-select[data-pending-id="incoming-m"]').check();
+  await page.locator('.pending-receive-qty[data-pending-id="incoming-m"]').fill('2');
+  await page.locator('#pending-receive-selected').click();
+  await expectSaved(page, db => db.pendingOrders.find(order => order.id === 'incoming-m').qty === 1);
+  await page.locator('[data-workspace-tab="inventory"]').click();
+  await expect(available.locator('[data-stock-pending]')).toHaveText('4');
+  await expect(available.locator('tbody tr td').nth(4)).toHaveText('7');
+  expect(errors).toEqual([]);
+});

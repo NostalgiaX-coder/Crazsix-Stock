@@ -1894,8 +1894,8 @@ function setupStockWorkspace(content) {
         const rowQty = visible.reduce((sum,v) => sum + v.qty, 0), rowValue = visible.reduce((sum,v) => sum + v.qty * v.cost, 0);
         row.dataset.visibleQty = rowQty; row.dataset.visibleValue = rowValue;
         row.children[4].textContent = rowQty;
-        row.children[5].textContent = fmtMoney(rowQty ? rowValue / rowQty : 0);
-        row.children[6].textContent = fmtMoney(rowValue);
+        row.children[6].textContent = fmtMoney(rowQty ? rowValue / rowQty : 0);
+        row.children[7].textContent = fmtMoney(rowValue);
         if (!row.hidden) { count++; qty += rowQty; value += rowValue; }
       });
       inventory.querySelectorAll("tbody").forEach(body => {
@@ -2461,6 +2461,7 @@ function renderStockRows(groups) {
       <td>${escapeHtml(group.color)}</td>
       <td class="stock-size-list">${sizeRows}</td>
       <td class="num">${totalQty}</td>
+      <td class="num" data-stock-pending>${group.pendingQty || 0}</td>
       <td class="num">${fmtMoney(averageCost)}</td>
       <td class="num">${fmtMoney(totalValue)}</td>
     </tr>`;
@@ -2474,6 +2475,16 @@ function renderStockTab() {
     groups
       .map((group) => ({
         ...group,
+        pendingQty: pendingOrders.reduce((sum, order) => {
+          const productName = products.find(product => product.id === order.productId)?.name || order.name;
+          if (normalizedText(productName) !== normalizedText(group.name) ||
+              normalizedText(order.color) !== normalizedText(group.variants[0].variant.color)) return sum;
+          // Keep each order in one section, including orders for a new size.
+          const matching = group.variants.find(({ product, variant }) =>
+            (!order.productId || product.id === order.productId) && stockOptionKey(variant) === stockOptionKey(order));
+          const belongsToAvailable = matching ? matching.variant.qty > 0 : group.variants.some(({ variant }) => variant.qty > 0);
+          return belongsToAvailable === inStock ? sum + order.qty : sum;
+        }, 0),
         variants: group.variants.filter(({ variant }) =>
           inStock ? variant.qty > 0 : variant.qty <= 0,
         ),
@@ -2486,7 +2497,7 @@ function renderStockTab() {
       <h3 id="stock-heading-${key}">${title}<span class="stock-section-count">${sectionGroups.length} กลุ่มสินค้า</span></h3>
       <table>
         <thead><tr>
-          <th></th><th>ชื่อสินค้า</th><th>สี</th><th>ไซส์ / รายละเอียด</th><th class="num">คงเหลือรวม</th><th class="num">ต้นทุนเฉลี่ย</th><th class="num">มูลค่าคงเหลือ</th>
+          <th></th><th>ชื่อสินค้า</th><th>สี</th><th>ไซส์ / รายละเอียด</th><th class="num">คงเหลือรวม</th><th class="num">สั่งซื้อรอรับ</th><th class="num">ต้นทุนเฉลี่ย</th><th class="num">มูลค่าคงเหลือ</th>
         </tr></thead>
         <tbody>${renderStockRows(sectionGroups)}</tbody>
       </table>
