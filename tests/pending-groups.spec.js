@@ -41,11 +41,11 @@ test('cancelling a combined row deducts all its unreceived lots once and preserv
   expect(db.transactions[0]).toMatchObject({ amount: 90, pendingIds: ['white'] });
   expect(db.products).toEqual(seed().products);
 });
-test('different condition and measurements remain distinct; grouped receipt survives failed writes', async ({ page }) => {
+test('conditions remain distinct while measured and unmeasured sizes combine; grouped receipt survives failed writes', async ({ page }) => {
   const s = seed();
   s.pendingOrders.push({ ...s.pendingOrders[0], id: 'used', type: 'used' }, { ...s.pendingOrders[0], id: 'measured', chestInches: 22 });
   await boot(page, s); await open(page);
-  await expect(page.locator('.pending-select')).toHaveCount(4);
+  await expect(page.locator('.pending-select')).toHaveCount(3);
   await page.locator('.pending-select[data-pending-id="recent"]').check();
   await page.locator('.pending-receive-qty[data-pending-id="recent"]').fill('4');
   await page.evaluate(() => window.__testSaveError = 'offline');
@@ -55,4 +55,36 @@ test('different condition and measurements remain distinct; grouped receipt surv
   await page.locator('#modal-ok-btn').click(); await page.evaluate(() => delete window.__testSaveError);
   await page.locator('#pending-receive-selected').click();
   await expectSaved(page, db => db.pendingOrders.find(o => o.id === 'recent').qty === 1);
+});
+
+
+test('F1 Jacket Black L combines 4 measured and 2 unmeasured pending units while right details stay separate', async ({ page }) => {
+  const s = inventory();
+  s.products[0].name = 'F1 Jacket';
+  const base = { color: 'Black', size: 'L', type: 'new', price: 250, cost: 100 };
+  s.products[0].variants = [
+    { ...base, id: 'measured-stock', qty: 1, chestInches: 24, lengthInches: 28 },
+    { ...base, id: 'plain-stock', qty: 0 }
+  ];
+  s.pendingOrders = [
+    { ...base, id: 'measured-order', name: 'F1 Jacket', qty: 4, chestInches: 24, lengthInches: 28, orderDate: '2026-01-01' },
+    { ...base, id: 'plain-order', name: 'F1 Jacket', qty: 2, orderDate: today() }
+  ];
+  const errors = await boot(page, s); await nav(page, 'stock');
+  await expect(page.locator('[data-stock-variant="measured-stock"] .stock-size-pending')).toHaveText('รอรับ 6 ชิ้น');
+  await expect(page.locator('[data-stock-variant="plain-stock"] .stock-size-pending')).toHaveText('รอรับ 6 ชิ้น');
+  await expect(page.locator('.stock-pending-option')).toHaveCount(2);
+  await expect(page.locator('.stock-pending-option').filter({ hasText: 'อก 24' })).toContainText('รอรับ 4 ชิ้น');
+  await expect(page.locator('.stock-pending-option').filter({ hasNotText: 'อก 24' })).toContainText('รอรับ 2 ชิ้น');
+  await page.locator('[data-workspace-tab="pending"]').click();
+  await expect(page.locator('.pending-select')).toHaveCount(1);
+  await expect(page.locator('.pending-receive-qty')).toHaveValue('6');
+  await page.locator('.pending-select').check();
+  await page.locator('.pending-receive-qty').fill('5');
+  await page.locator('#pending-receive-selected').click();
+  await expectSaved(page, db => db.pendingOrders.length === 1 && db.pendingOrders[0].qty === 1);
+  const db = await snapshot(page);
+  expect(db.products[0].variants.find(v => v.id === 'measured-stock').qty).toBe(5);
+  expect(db.products[0].variants.find(v => v.id === 'plain-stock').qty).toBe(1);
+  expect(errors).toEqual([]);
 });

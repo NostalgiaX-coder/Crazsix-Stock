@@ -1018,12 +1018,16 @@ function pendingLabel(po) {
   return parts.join(" · ");
 }
 
+function pendingSizeKey(order) {
+  return stockOptionKey({ ...order, chestInches: null, lengthInches: null });
+}
+
 function pendingOrderGroups() {
   const groups = new Map();
   for (const order of pendingOrders) {
     const name = products.find(product => product.id === order.productId)?.name || order.name;
-    const key = JSON.stringify([normalizedText(name), stockOptionKey(order)]);
-    if (!groups.has(key)) groups.set(key, { ...order, name, qty: 0, totalCost: 0, receivedQty: 0, originalQty: 0, orders: [] });
+    const key = JSON.stringify([normalizedText(name), pendingSizeKey(order)]);
+    if (!groups.has(key)) groups.set(key, { ...order, name, chestInches: null, lengthInches: null, qty: 0, totalCost: 0, receivedQty: 0, originalQty: 0, orders: [] });
     const group = groups.get(key);
     group.qty += order.qty;
     group.totalCost += order.cost * order.qty;
@@ -2476,7 +2480,8 @@ function renderStockRows(groups) {
       ).join("");
       const sizeRows = group.variants
         .map(({ variant: v }) => {
-          const pendingQty = incomingOptions.get(stockOptionKey(v))?.qty || 0;
+          const pendingQty = group.pendingOrders.reduce((sum, order) =>
+            pendingSizeKey(order) === pendingSizeKey(v) ? sum + order.qty : sum, 0);
           const isSoldOut = v.qty <= 0;
           return `
       <div class="stock-size-item ${isSoldOut ? "soldout-item" : ""}" data-stock-variant="${escapeHtml(v.id)}">
@@ -2672,9 +2677,9 @@ function renderStockTab() {
             <input type="checkbox" class="pending-select" data-pending-id="${po.id}" style="width:18px; height:18px; accent-color: var(--navy); flex-shrink:0;">
             <div class="thumb" style="width:36px;height:36px;">${po.image ? `<img src="${escapeHtml(po.image)}" alt="">` : '<span class="thumb-ph">📦</span>'}</div>
             <div class="variant-info">
-              ${escapeHtml(pendingLabel(po))} x${po.qty}<br>
+              ${escapeHtml(pendingLabel(po.orders.length === 1 ? { ...po, ...measurementsOf(po.orders[0]) } : po))} x${po.qty}<br>
               <span class="hint" style="margin:0;">สั่งเมื่อ ${po.orderDate} · ต้นทุนส่วนที่รอรับ ${fmtMoney(po.totalCost)}${po.orders.length > 1 ? " · รวม " + po.orders.length + " รายการสั่งซื้อ" : ""}${po.receivedQty ? " · รับแล้ว " + po.receivedQty + "/" + po.originalQty + " ชิ้น" : ""}${po.note ? " · " + escapeHtml(po.note) : ""}</span>
-              ${po.orders.length > 1 ? `<details class="pending-order-details"><summary>รายละเอียดการสั่งซื้อ ${po.orders.length} ครั้ง</summary>${po.orders.map(order => `<p>${escapeHtml(order.orderDate)} · รอรับ ${order.qty} ชิ้น · ต้นทุน/ชิ้น ${fmtMoney(order.cost)}${order.note ? ` · ${escapeHtml(order.note)}` : ""}</p>`).join("")}</details>` : ""}
+              ${po.orders.length > 1 ? `<details class="pending-order-details"><summary>รายละเอียดการสั่งซื้อ ${po.orders.length} ครั้ง</summary>${po.orders.map(order => `<p>${escapeHtml(order.orderDate)}${measurementLabel(order) ? ` · ${escapeHtml(measurementLabel(order))}` : " · ไม่ระบุอก/ยาว"} · รอรับ ${order.qty} ชิ้น · ต้นทุน/ชิ้น ${fmtMoney(order.cost)}${order.note ? ` · ${escapeHtml(order.note)}` : ""}</p>`).join("")}</details>` : ""}
             </div>
             <div class="field pending-receive-field"><label>รับครั้งนี้ (ชิ้น)</label><input class="pending-receive-qty" data-pending-id="${escapeHtml(po.id)}" type="number" min="1" max="${po.qty}" step="1" value="${po.qty}" aria-label="จำนวนรับ ${escapeHtml(po.name)}"></div>
             <button class="btn-danger" data-cancel-pending="${po.id}">ยกเลิก</button>
