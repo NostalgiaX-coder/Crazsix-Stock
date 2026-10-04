@@ -1,5 +1,5 @@
-import { cancelledSaleFor, activeAccountingTransactions, deliveryLabels, pendingDeliveries, validateShipments, applyShipmentAction } from "./shipments.js";
-import { renderShipments, wireShipments } from "./shipments-ui.js";
+import { cancelledSaleFor, activeAccountingTransactions, deliveryLabels, pendingDeliveries, validateShipments, applyShipmentAction, validPersonalPercent } from "./shipments.js";
+import { renderShipments, wireShipments, renderShipmentAllocation } from "./shipments-ui.js";
 import { reconcileAutomaticAds, campaignProductIds, campaignHasProduct, campaignUntilBudget, productAdMetrics, validateAdsBackup, validateAdWallet, applyAdAction, isAdSpend } from "./ads.js";
 import { renderAds, wireAds } from "./ads-ui.js";
 import { parseMeasurement, measurementsOf, validMeasurements, measurementLabel, stockOptionKey, assertStockRows, assertShipping, stockAdjustment, validAdjustments, allocateCashCosts } from "./inventory-tools.js";
@@ -1018,6 +1018,22 @@ function pendingLabel(po) {
   return parts.join(" · ");
 }
 
+function pendingOrderGroups() {
+  const groups = new Map();
+  for (const order of pendingOrders) {
+    const name = products.find(product => product.id === order.productId)?.name || order.name;
+    const key = JSON.stringify([normalizedText(name), stockOptionKey(order)]);
+    if (!groups.has(key)) groups.set(key, { ...order, name, qty: 0, totalCost: 0, receivedQty: 0, originalQty: 0, orders: [] });
+    const group = groups.get(key);
+    group.qty += order.qty;
+    group.totalCost += order.cost * order.qty;
+    group.receivedQty += order.receivedQty || 0;
+    group.originalQty += order.originalQty ?? order.qty;
+    group.orders.push(order);
+  }
+  return [...groups.values()];
+}
+
 function addPendingOrderCore(data) {
   const po = {
     id: uid(),
@@ -1099,27 +1115,29 @@ async function receivePendingOrdersBulk(ids, shippingTotal, quantities = {}) {
   render();
 }
 
-async function deletePendingOrder(pendingId) {
-  const order = pendingOrders.find(order => order.id === pendingId);
-  if (!order) return;
-  const reviewed = JSON.stringify([order, transactions]);
+async function deletePendingOrder(pendingIds) {
+  const ids = new Set(pendingIds);
+  const orders = pendingOrders.filter(order => ids.has(order.id));
+  if (!orders.length || orders.length !== ids.size) return;
+  const reviewed = JSON.stringify([orders, transactions]);
   if (
     !(await showConfirm(
-      "ยกเลิกรายการสั่งซื้อนี้และหักยอดสินค้าที่ยังไม่ได้รับออกจากบัญชีรายจ่าย? สินค้าที่รับแล้วและค่าส่งยังคงเดิม",
+      `ยกเลิกสินค้ารอรับกลุ่มนี้ทั้งหมด ${orders.reduce((sum, order) => sum + order.qty, 0)} ชิ้น และหักยอดที่ยังไม่ได้รับออกจากบัญชีรายจ่าย? สินค้าที่รับแล้วและค่าส่งยังคงเดิม`,
     ))
   )
     return;
-  if (reviewed !== JSON.stringify([pendingOrders.find(order => order.id === pendingId), transactions])) {
+  if (reviewed !== JSON.stringify([pendingOrders.filter(order => ids.has(order.id)), transactions])) {
     showAlert("รายการรอรับเปลี่ยนแปลงระหว่างยืนยัน กรุณาตรวจสอบอีกครั้ง");
     return;
   }
   transactions = transactions.flatMap(tx => {
-    if (tx.type !== "expense" || !tx.pendingIds?.includes(pendingId)) return [tx];
-    const amount = money(Math.max(0, tx.amount - money(order.cost * order.qty)));
+    const cancelled = orders.filter(order => tx.pendingIds?.includes(order.id));
+    if (tx.type !== "expense" || !cancelled.length) return [tx];
+    const amount = money(Math.max(0, tx.amount - money(cancelled.reduce((sum, order) => sum + order.cost * order.qty, 0))));
     if (amount === 0) return [];
-    return [{ ...tx, amount, pendingIds: tx.pendingIds.filter(id => id !== pendingId) }];
+    return [{ ...tx, amount, pendingIds: tx.pendingIds.filter(id => !ids.has(id)) }];
   });
-  pendingOrders = pendingOrders.filter((p) => p.id !== pendingId);
+  pendingOrders = pendingOrders.filter((p) => !ids.has(p.id));
   await saveData("pendingOrders", "transactions");
   render();
   toast("ยกเลิกรายการรอรับและนำยอดที่ยกเลิกออกจากรายรับ–รายจ่ายแล้ว");
@@ -1310,6 +1328,10 @@ async function sellVariant(variantId, data) {
   if (data.adCampaignId && !campaign) { showAlert("ไม่พบแคมเปญของสินค้านี้ กรุณาเลือกใหม่"); return; }
   const adReservePerUnit = campaign ? (String(data.adReservePerUnit ?? '').trim() === '' ? campaign.reservePerUnit : Number(data.adReservePerUnit)) : null;
   if (adReservePerUnit != null && (!validCash(adReservePerUnit) || adReservePerUnit < 0 || !validCash(money(adReservePerUnit * qty)))) { showAlert("ยอดแบ่งยิงแอดต้องตั้งแต่ 0 และมีทศนิยมไม่เกิน 2 ตำแหน่ง"); return; }
+  const personalUsePercent = Number(data.personalUsePercent || 0);
+  if (!validPersonalPercent(personalUsePercent)) {
+    showAlert("เปอร์เซ็นต์เงินใช้ส่วนตัวต้องอยู่ระหว่าง 0–100 และมีทศนิยมไม่เกิน 2 ตำแหน่ง"); return;
+  }
   const customerNote = String(data.customerNote || "").trim();
   if (customerNote.length > 2000) { showAlert("ข้อมูลผู้รับต้องไม่เกิน 2,000 ตัวอักษร"); return; }
   variant.qty -= qty;
@@ -1341,6 +1363,7 @@ async function sellVariant(variantId, data) {
       stockProductId: product.id,
       deliveryStatus: "pending",
       ...measurementsOf(variant),
+      personalUsePercent,
       ...(campaign ? { adCampaignId: campaign.id, ...(adReservePerUnit != null ? { adReservePerUnit } : {}) } : {}),
       paidAmount: deposit,
       dueDate: addDaysStr(data.dueDays),
@@ -1377,6 +1400,7 @@ async function sellVariant(variantId, data) {
       profit,
       stockProductId: product.id,
       ...measurementsOf(variant),
+      personalUsePercent,
       ...(campaign ? { adCampaignId: campaign.id, ...(adReservePerUnit != null ? { adReservePerUnit } : {}) } : {}),
     });
   }
@@ -2481,7 +2505,11 @@ function renderStockRows(groups) {
 }
 
 function renderStockTab() {
+  const incomingGroups = pendingOrderGroups();
   const groups = stockColorGroups();
+  const isAvailable = (group, variant) => variant.type === "new"
+    ? group.variants.some(({ variant: option }) => option.type === "new" && option.qty > 0)
+    : variant.qty > 0;
   const splitGroups = (inStock) =>
     groups
       .map((group) => ({
@@ -2493,11 +2521,15 @@ function renderStockTab() {
           // Keep each order in one section, including orders for a new size.
           const matching = group.variants.find(({ product, variant }) =>
             (!order.productId || product.id === order.productId) && stockOptionKey(variant) === stockOptionKey(order));
-          const belongsToAvailable = matching ? matching.variant.qty > 0 : group.variants.some(({ variant }) => variant.qty > 0);
+          const belongsToAvailable = matching
+            ? isAvailable(group, matching.variant)
+            : order.type === "new" && group.variants.some(({ variant }) => variant.type === "new")
+              ? isAvailable(group, order)
+              : group.variants.some(({ variant }) => variant.qty > 0);
           return belongsToAvailable === inStock;
         }),
         variants: group.variants.filter(({ variant }) =>
-          inStock ? variant.qty > 0 : variant.qty <= 0,
+          isAvailable(group, variant) === inStock,
         ),
       }))
       .filter((group) => group.variants.length > 0);
@@ -2626,14 +2658,14 @@ function renderStockTab() {
     </div>
 
     <div class="panel">
-      <h2>สินค้าที่สั่งซื้อแล้ว รอรับของ${pendingOrders.length > 0 ? " (" + pendingOrders.length + ")" : ""}</h2>
-      <p class="hint">รายการนี้จ่ายเงินไปแล้ว (นับเป็นรายจ่ายแล้ว) แต่ยังไม่นับเป็นสต็อกที่ขายได้ จนกว่าจะกดยืนยันว่าได้รับของจริง — ติ๊กเลือกรายการที่ของมาถึงพร้อมกัน ระบุจำนวนที่ได้รับครั้งนี้ได้แม้มาไม่ครบ แล้วใส่ค่าส่งรวมครั้งเดียวได้</p>
+      <h2>สินค้าที่สั่งซื้อแล้ว รอรับของ${incomingGroups.length > 0 ? " (" + incomingGroups.length + " กลุ่ม)" : ""}</h2>
+      <p class="hint">รายการนี้จ่ายเงินไปแล้ว (นับเป็นรายจ่ายแล้ว) แต่ยังไม่นับเป็นสต็อกที่ขายได้ จนกว่าจะกดยืนยันว่าได้รับของจริง สีและไซส์เดียวกันรวมยอดแล้ว รับบางส่วนจะตัดจากรายการที่สั่งก่อน — ติ๊กเลือกรายการที่ของมาถึงพร้อมกัน ระบุจำนวนที่ได้รับครั้งนี้ได้แม้มาไม่ครบ แล้วใส่ค่าส่งรวมครั้งเดียวได้</p>
       ${
         pendingOrders.length === 0
           ? `<div class="empty"><div class="big">ไม่มีรายการรอรับของ</div></div>`
           : `
       <div style="display:flex; flex-direction:column; gap:8px;">
-        ${pendingOrders
+        ${incomingGroups
           .map(
             (po) => `
           <div class="variant-row" style="align-items:center;">
@@ -2641,7 +2673,8 @@ function renderStockTab() {
             <div class="thumb" style="width:36px;height:36px;">${po.image ? `<img src="${escapeHtml(po.image)}" alt="">` : '<span class="thumb-ph">📦</span>'}</div>
             <div class="variant-info">
               ${escapeHtml(pendingLabel(po))} x${po.qty}<br>
-              <span class="hint" style="margin:0;">สั่งเมื่อ ${po.orderDate} · ต้นทุนส่วนที่รอรับ ${fmtMoney(po.cost * po.qty)}${po.receivedQty ? " · รับแล้ว " + po.receivedQty + "/" + po.originalQty + " ชิ้น" : ""}${po.note ? " · " + escapeHtml(po.note) : ""}</span>
+              <span class="hint" style="margin:0;">สั่งเมื่อ ${po.orderDate} · ต้นทุนส่วนที่รอรับ ${fmtMoney(po.totalCost)}${po.orders.length > 1 ? " · รวม " + po.orders.length + " รายการสั่งซื้อ" : ""}${po.receivedQty ? " · รับแล้ว " + po.receivedQty + "/" + po.originalQty + " ชิ้น" : ""}${po.note ? " · " + escapeHtml(po.note) : ""}</span>
+              ${po.orders.length > 1 ? `<details class="pending-order-details"><summary>รายละเอียดการสั่งซื้อ ${po.orders.length} ครั้ง</summary>${po.orders.map(order => `<p>${escapeHtml(order.orderDate)} · รอรับ ${order.qty} ชิ้น · ต้นทุน/ชิ้น ${fmtMoney(order.cost)}${order.note ? ` · ${escapeHtml(order.note)}` : ""}</p>`).join("")}</details>` : ""}
             </div>
             <div class="field pending-receive-field"><label>รับครั้งนี้ (ชิ้น)</label><input class="pending-receive-qty" data-pending-id="${escapeHtml(po.id)}" type="number" min="1" max="${po.qty}" step="1" value="${po.qty}" aria-label="จำนวนรับ ${escapeHtml(po.name)}"></div>
             <button class="btn-danger" data-cancel-pending="${po.id}">ยกเลิก</button>
@@ -2732,6 +2765,7 @@ function renderStockTab() {
 }
 
 function wireStockTab() {
+  const incomingGroups = copyData(pendingOrderGroups());
   const f = document.getElementById("add-product-form");
   const newFields = document.getElementById("new-item-fields");
   const restockFields = document.getElementById("restock-fields");
@@ -3389,11 +3423,27 @@ function wireStockTab() {
         return;
       }
       const shipAmt = document.getElementById("pending-bulk-ship").value;
-      await receivePendingOrdersBulk(ids, shipAmt, Object.fromEntries([...document.querySelectorAll(".pending-receive-qty")].map(input => [input.dataset.pendingId, input.value])));
+      const quantities = {};
+      for (const id of ids) {
+        const group = incomingGroups.find(group => group.id === id);
+        if (!group || group.orders.some(order => JSON.stringify(pendingOrders.find(current => current.id === order.id)) !== JSON.stringify(order))) {
+          showAlert("รายการรอรับเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุดแล้วเลือกใหม่"); return;
+        }
+        let remaining = Number([...document.querySelectorAll(".pending-receive-qty")].find(input => input.dataset.pendingId === id).value);
+        if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > group.qty) {
+          showAlert("จำนวนรับต้องเป็นจำนวนเต็มตั้งแต่ 1 และไม่เกินจำนวนที่รอรับ"); return;
+        }
+        for (const order of [...group.orders].sort((a, b) => a.orderDate.localeCompare(b.orderDate))) {
+          const qty = Math.min(remaining, order.qty);
+          if (qty > 0) quantities[order.id] = qty;
+          remaining -= qty;
+        }
+      }
+      await receivePendingOrdersBulk(Object.keys(quantities), shipAmt, quantities);
     };
   }
   document.querySelectorAll("[data-cancel-pending]").forEach((btn) => {
-    btn.onclick = () => deletePendingOrder(btn.dataset.cancelPending);
+    btn.onclick = () => deletePendingOrder(incomingGroups.find(group => group.id === btn.dataset.cancelPending).orders.map(order => order.id));
   });
 
   // --- bulk attach shipping ---
@@ -3492,6 +3542,7 @@ function renderSellTab() {
         <div class="field"><label>ยอดขายมาจากแคมเปญ (ถ้ามี)</label><select class="sell-ad-campaign"><option value="">ไม่ระบุแคมเปญ</option></select></div>
         <div class="field"><label>แบ่งยิงแอดต่อ (บาท/ชิ้น)</label><input class="sell-ad-reserve" type="number" min="0" max="1000000000000" step="0.01" placeholder="ใช้ค่าที่ตั้งในแคมเปญ" disabled></div>
         <p class="hint sell-ad-preview" aria-live="polite"></p>
+        <div class="field"><label>แบ่งเงินใช้ส่วนตัว (% ของยอดขายเต็ม)</label><input class="sell-personal-percent" type="number" min="0" max="100" step="0.01" value="0" aria-label="เปอร์เซ็นต์เงินใช้ส่วนตัว"><p class="hint sell-personal-preview" aria-live="polite"></p></div>
         <div class="sale-total" aria-live="polite"><span>ยอดขายรวม / กำไรประมาณ</span><b class="sale-total-value"></b></div>
         <button class="btn btn-gold btn-sm sell-submit" style="width:100%; margin-top:10px;" data-sell="${first.id}">${icon("bag")}บันทึกการขาย</button>
         <div class="checkline" style="margin-top:10px;"><input type="checkbox" class="sell-installment"><label>ลูกค้าผ่อนชำระ (ไม่ได้เงินก้อนเดียว)</label></div>
@@ -3563,6 +3614,10 @@ function wireSellTab() {
         (Number(card.querySelector(".sell-commission").value) || 0);
     card.querySelector(".sale-total-value").textContent =
       `${fmtMoney(total)} / ${fmtMoney(profit)}`;
+    const personalPercent = Number(card.querySelector(".sell-personal-percent").value);
+    card.querySelector(".sell-personal-preview").textContent = validPersonalPercent(personalPercent)
+      ? `แบ่งใช้ส่วนตัว ${fmtMoney(money(total * personalPercent / 100))} (${personalPercent}% ของยอดขายก่อนหักค่าใช้จ่าย) · แจ้งยอดตามจำนวนที่ส่งในแต่ละครั้ง`
+      : "กรอกเปอร์เซ็นต์ 0–100 ทศนิยมไม่เกิน 2 ตำแหน่ง";
     const campaign = adCampaigns.find(c => c.id === card.querySelector(".sell-ad-campaign").value);
     const reserveInput = card.querySelector(".sell-ad-reserve");
     reserveInput.disabled = !campaign;
@@ -3608,6 +3663,7 @@ function wireSellTab() {
   document.querySelectorAll("[data-sale-card]").forEach((card) => {
     card.querySelector(".sell-ad-campaign").onchange = () => { card.querySelector(".sell-ad-reserve").value = ""; updateSaleTotal(card); };
     card.querySelector(".sell-ad-reserve").oninput = () => updateSaleTotal(card);
+    card.querySelector(".sell-personal-percent").oninput = () => updateSaleTotal(card);
     card.querySelector(".sell-color-select").onchange = () =>
       syncSaleCard(card);
     card.querySelector(".sell-size-select").onchange = () => syncSaleCard(card);
@@ -3639,6 +3695,7 @@ function wireSellTab() {
         customerNote: card.querySelector(".sell-customer").value,
         adCampaignId: card.querySelector(".sell-ad-campaign").value,
         adReservePerUnit: card.querySelector(".sell-ad-reserve").value,
+        personalUsePercent: card.querySelector(".sell-personal-percent").value,
       });
     };
   });
@@ -4631,6 +4688,16 @@ function wireShipmentsTab() {
     if (action.type === "cancelSale") products = next.products;
     await saveData("transactions","shipments", ...(action.type === "cancelSale" ? ["products"] : []));
     render();
+    if (action.type === "ship") {
+      const notice = document.createElement("section");
+      notice.id = "shipment-allocation-notice";
+      notice.className = "panel shipment-allocation-notice";
+      notice.setAttribute("role", "status");
+      notice.setAttribute("tabindex", "-1");
+      notice.innerHTML = `<h2>ส่งสินค้าแล้ว · สรุปแบ่งเงินครั้งนี้</h2>${renderShipmentAllocation(next.shipments[0].allocation, { esc: escapeHtml, fmt: fmtMoney })}`;
+      document.getElementById("tab-content").prepend(notice);
+      notice.focus();
+    }
     toast(action.type === "shippingCost" ? "แก้ไขค่าส่งและกำไรแล้ว" : action.type === "cancelSale" ? "ยกเลิกการขายและคืนสต็อกแล้ว" : action.type === "refundSale" ? "บันทึกคืนเงินแล้ว" : action.type === "ship" ? "บันทึกส่งสินค้าแล้ว" : "คืนรายการเข้ารอส่งแล้ว");
   }});
 }

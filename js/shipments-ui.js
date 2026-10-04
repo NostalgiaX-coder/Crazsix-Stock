@@ -1,5 +1,9 @@
 import { cancellationRefundDue, deliveryLabels, pendingDeliveries } from './shipments.js';
 
+export function renderShipmentAllocation(allocation, {esc, fmt}) {
+  return `<div class="shipment-allocation"><p>ยอดขายสินค้าที่ส่งครั้งนี้ <strong>${fmt(allocation.revenue)}</strong></p><div class="shipment-allocation-totals"><p>ควรแบ่งยิงแอด <strong data-allocation-ads>${fmt(allocation.adReserve)}</strong></p><p>แบ่งใช้ส่วนตัว <strong data-allocation-personal>${fmt(allocation.personalAmount)}</strong></p></div><p class="hint">เงินใช้ส่วนตัวคิดจากยอดขายเต็มก่อนหักค่าใช้จ่าย ตาม % ของแต่ละรายการ เฉพาะจำนวนที่ส่งครั้งนี้ เป็นยอดแนะนำ ยังไม่บันทึกถอนเงินหรือเติมเครดิตแอด</p>${allocation.items.some(item => item.outstanding > 0) ? '<p class="hint">มีรายการผ่อนที่ยังรับเงินไม่ครบ ยอดแบ่งนี้เป็นแผนตามยอดขายเต็ม</p>' : ''}<details><summary>รายละเอียดแบ่งเงินรายรายการ</summary>${allocation.items.map(item => `<p>${esc(item.description || item.saleId)} · ส่ง ${item.qty} ชิ้น · แอด ${fmt(item.adReserve)} · ใช้ส่วนตัว ${item.personalPercent}% = ${fmt(item.personalAmount)}</p>`).join('')}</details></div>`;
+}
+
 export function renderShipments({transactions,shipments=[]},{esc,today,fmt,metric}) {
   const pending = pendingDeliveries(transactions,shipments);
   const outstanding = tx => tx.type === 'installment' ? Math.max(0,tx.amount-(tx.paidAmount || 0)) : 0;
@@ -26,6 +30,7 @@ export function renderShipments({transactions,shipments=[]},{esc,today,fmt,metri
     <div class="shipment-history">${shipments.map(s=>`<article class="shipment-history-card" data-shipment-id="${esc(s.id)}"><div class="section-heading"><h3>${esc(s.recipient || 'พัสดุ '+s.id)}</h3><span class="tag ${s.status==='cancelled'?'expense':'income'}">${s.status==='cancelled'?'ยกเลิกการบันทึกส่ง':'ส่งสินค้าแล้ว'}</span></div>
       <p>${s.date} · ${esc(s.carrier || 'ไม่ระบุขนส่ง')} · เลขพัสดุ ${esc(s.trackingNumber || 'ยังไม่ระบุ')}</p>${s.note ? `<p>${esc(s.note)}</p>` : ''}
       <ul>${s.items.map(i=>`<li>${esc(transactions.find(tx=>tx.id===i.saleId)?.desc || i.saleId)} — ส่ง ${i.qty} ชิ้น</li>`).join('')}</ul>
+      ${s.allocation && s.status === 'shipped' ? `<h4>ยอดแบ่งเงิน ณ ตอนส่งพัสดุนี้</h4>${renderShipmentAllocation(s.allocation, {esc, fmt})}` : ''}
       <div class="field"><label for="shipment-cost-${esc(s.id)}">ค่าส่งพัสดุนี้ (บาท)</label><input id="shipment-cost-${esc(s.id)}" class="shipment-history-cost" type="number" min="0" max="1000000000000" step="0.01" value="${s.shippingCost || 0}"><button type="button" class="btn btn-ghost" data-shipment-cost="${esc(s.id)}">แก้ไขค่าส่ง</button><small class="hint">แก้ยอดรวมของพัสดุนี้ ใส่ 0 เพื่อลบค่าส่งที่ลงผิด ไม่กระทบค่าส่งที่บันทึกตอนขาย</small></div>
       ${s.status==='shipped'?`<button class="btn btn-ghost" data-shipment-cancel="${esc(s.id)}">ยกเลิกการบันทึกส่ง</button>`:`<p class="hint">ยกเลิกเมื่อ ${s.cancelledAt} · นำจำนวนกลับเข้ารอส่งแล้ว</p>`}</article>`).join('') || '<p class="hint">ยังไม่มีประวัติการส่งสินค้า</p>'}</div></section>`;
 }

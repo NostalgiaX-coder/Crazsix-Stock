@@ -1,4 +1,5 @@
 // Delivery is independent of stock and payment: both are recorded at checkout.
+import { adMetrics } from './ads.js';
 import { money } from './preorders.js';
 import { allocateCashCosts } from './inventory-tools.js';
 export const deliveryLabels = {pending:'รอส่ง', partial:'ส่งบางส่วน', shipped:'ส่งสินค้าแล้ว', cancelled:'ยกเลิกการขายแล้ว'};
@@ -24,6 +25,31 @@ const statusFor = (tx,shipments) => {
   const sent = shippedQuantity(tx.id,shipments);
   return sent === 0 ? 'pending' : sent === tx.qty ? 'shipped' : 'partial';
 };
+export const validPersonalPercent = value => Number.isFinite(value) && value >= 0 && value <= 100 && Math.abs(value * 100 - Math.round(value * 100)) < 1e-7;
+
+export function shipmentAllocation(state, shipment, today) {
+  const items = shipment.items.map(item => {
+    const tx = state.transactions.find(tx => tx.id === item.saleId);
+    const previousQty = shippedQuantity(tx.id, state.shipments.filter(s => s.id !== shipment.id));
+    // Cumulative rounding keeps partial shipments equal to the full-sale allocation.
+    const portion = total => money(money(total * (previousQty + item.qty) / tx.qty) - money(total * previousQty / tx.qty));
+    const campaign = (state.adCampaigns || []).find(c => c.id === tx.adCampaignId);
+    const rate = tx.adReservePerUnit ?? campaign?.reservePerUnit;
+    let adReserve = rate != null ? money(rate * item.qty) : 0;
+    if (rate == null && campaign) {
+      const metrics = adMetrics(campaign, state.transactions, today);
+      const percentQty = metrics.sales.filter(sale => sale.adReservePerUnit == null).reduce((sum, sale) => sum + sale.qty, 0);
+      adReserve = percentQty ? portion(money(metrics.percentReserve * tx.qty / percentQty)) : 0;
+    }
+    return { saleId: tx.id, description: tx.desc || tx.id, qty: item.qty, revenue: portion(tx.amount), adReserve,
+      personalPercent: tx.personalUsePercent || 0,
+      personalAmount: portion(money(tx.amount * (tx.personalUsePercent || 0) / 100)),
+      outstanding: tx.type === 'installment' ? money(Math.max(0, tx.amount - (tx.paidAmount || 0))) : 0 };
+  });
+  const sum = key => money(items.reduce((total, item) => total + item[key], 0));
+  return { items, revenue: sum('revenue'), adReserve: sum('adReserve'), personalAmount: sum('personalAmount') };
+}
+
 export function validateShipments(shipments,transactions) {
   if (!Array.isArray(shipments) || new Set(shipments.map(s=>s?.id)).size !== shipments.length) return false;
   for (const s of shipments) {
@@ -31,6 +57,13 @@ export function validateShipments(shipments,transactions) {
       !text(s.recipient,2000) || !text(s.carrier,80) || !text(s.trackingNumber,120) || !text(s.note,1000) ||
       (s.status === 'cancelled' ? !validDate(s.cancelledAt) || s.cancelledAt < s.date : s.cancelledAt != null) ||
       !Array.isArray(s.items) || !s.items.length || new Set(s.items.map(i=>i?.saleId)).size !== s.items.length) return false;
+    if (s.allocation != null) {
+      const a = s.allocation;
+      if (!a || !Array.isArray(a.items) || a.items.length !== s.items.length || a.items.some(item => !item) ||
+          !['revenue', 'adReserve', 'personalAmount'].every(key => cash(a[key]) && money(a.items.reduce((sum, item) => sum + item[key], 0)) === a[key]) ||
+          a.items.some((item, index) => !item || item.saleId !== s.items[index].saleId || item.qty !== s.items[index].qty ||
+            !validPersonalPercent(item.personalPercent) || !['revenue', 'adReserve', 'personalAmount', 'outstanding'].every(key => cash(item[key])))) return false;
+    }
     const expenses=transactions.filter(tx=>tx.shipmentId===s.id);
     if (s.shippingCost != null) {
       if (!cash(s.shippingCost) || s.items.some(i=>!cash(i?.shippingShare)) || money(s.items.reduce((sum,i)=>sum+i.shippingShare,0))!==s.shippingCost ||
@@ -42,6 +75,7 @@ export function validateShipments(shipments,transactions) {
     }
   }
   return transactions.every(tx => {
+    if (tx.personalUsePercent != null && !validPersonalPercent(tx.personalUsePercent)) return false;
     if(tx.shipmentId!=null) {
       const shipment=shipments.find(s=>s.id===tx.shipmentId);
       if(!shipment || tx.type!=='expense' || tx.category!=='ค่าส่ง' || tx.date!==shipment.date || !cash(tx.amount) || tx.amount<=0) return false;
@@ -129,6 +163,11 @@ export function applyShipmentAction(state,action,id,today) {
     }
     shipments.unshift({id,status:'shipped',date:data.date,recipient:data.recipient,carrier:data.carrier,trackingNumber:data.trackingNumber,note:data.note,items:data.items.map(i=>({saleId:i.saleId,qty:i.qty}))});
     if(data.shippingCost != null && data.shippingCost!==0) setShippingCost(shipments[0],data.shippingCost);
+    check(data.items.every(item => {
+      const tx = transactions.find(tx => tx.id === item.saleId);
+      return tx.personalUsePercent == null || validPersonalPercent(tx.personalUsePercent);
+    }), 'เปอร์เซ็นต์เงินใช้ส่วนตัวต้องอยู่ระหว่าง 0–100 และมีทศนิยมไม่เกิน 2 ตำแหน่ง');
+    shipments[0].allocation = shipmentAllocation({ ...state, transactions, shipments }, shipments[0], today);
     affected = data.items.map(i=>i.saleId);
   } else if(action.type==='shippingCost') {
     const shipment=shipments.find(s=>s.id===action.shipmentId);
