@@ -3,7 +3,7 @@ import { adMetrics } from './ads.js';
 import { money } from './preorders.js';
 import { allocateCashCosts } from './inventory-tools.js';
 export const deliveryLabels = {pending:'รอส่ง', partial:'ส่งบางส่วน', shipped:'ส่งสินค้าแล้ว', cancelled:'ยกเลิกการขายแล้ว'};
-const sale = tx => tx && ['income','installment'].includes(tx.type) && ['ขายสินค้า','ขายสินค้ายกเลิก'].includes(tx.category);
+const sale = tx => tx && ['income','installment','preorder'].includes(tx.type) && ['ขายสินค้า','ขายสินค้ายกเลิก'].includes(tx.category);
 const cash = n => Number.isFinite(n) && n>=0 && n<=1e12 && Math.abs(n-money(n))<1e-7;
 // Receipts and refunds remain available for actual cash flow and refund reconciliation.
 export const cancelledSaleFor = (tx, transactions) => tx.deliveryStatus === 'cancelled' ? tx : transactions.find(parent => parent.deliveryStatus === 'cancelled' && (parent.id === tx.installmentId || parent.id === tx.saleCancellationId));
@@ -134,6 +134,7 @@ export function applyShipmentAction(state,action,id,today) {
     const tx=transactions.find(t=>t.id===action.saleId);
     check(trackedSale(tx) && JSON.stringify(tx)===action.expectedSales?.[tx.id], 'รายการขายเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุด');
     if (action.type==='cancelSale') {
+      check(tx.type !== 'preorder', 'รายการพรีออเดอร์ไม่รองรับการยกเลิกการขายจากเมนูนี้');
       check(tx.deliveryStatus==='pending' && shippedQuantity(tx.id,shipments)===0, 'ยกเลิกได้เฉพาะรายการที่ยังไม่ได้ส่งสินค้า');
       const variant=products.flatMap(p=>p.variants).find(v=>v.id===tx.productId);
       check(variant && Number.isFinite(tx.unitCost) && tx.unitCost>=0, 'ไม่พบตัวเลือกสินค้าหรือต้นทุนเดิมสำหรับคืนสต็อก กรุณาตรวจสอบสินค้า');

@@ -88,5 +88,5 @@ test('partial shipment rounding, legacy ad percentages and allocation backup val
     const invalidItem = validateShipments(state.shipments, state.transactions);
     return { portions, valid, invalidSum, invalidItem, ad };
   });
-  expect(result).toEqual({ portions: [0.17, 0.16, 0.17], valid: true, invalidSum: false, invalidItem: false, ad: 0.07 });
+  expect(result).toEqual({ portions: [0.17, 0.16, 0.17], valid: true, invalidSum: false, invalidItem: false, ad: 0.03 });
 });

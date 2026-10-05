@@ -1,3 +1,4 @@
+import { personalUseAmount, saleProfit } from "./sale-finance.js";
 import { adWalletMetrics, campaignUntilBudget } from "./ads.js";
 import { pendingDeliveries } from "./shipments.js";
 // Shared, side-effect-free helpers for reports and store follow-ups.
@@ -19,7 +20,8 @@ export function cashSummary(transactions, from = '', to = '') {
     rows, income: sum('income'), expense: sum('expense'),
     cash: sum('income') - sum('expense'),
     sales: sales.reduce((total, tx) => total + tx.amount, 0),
-    profit: sales.reduce((total, tx) => total + tx.profit, 0),
+    profit: sales.reduce((total, tx) => total + saleProfit(tx), 0),
+    personalUse: sales.reduce((total, tx) => total + personalUseAmount(tx), 0),
     qty: sales.reduce((total, tx) => total + (tx.qty || 0), 0),
   };
 }

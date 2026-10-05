@@ -1,3 +1,4 @@
+import { saleProfit } from "./sale-finance.js";
 // Campaign planning and cost attribution. Inventory purchase costs are never rewritten.
 import { money } from './preorders.js';
 
@@ -62,10 +63,10 @@ export function adMetrics(c, transactions, today) {
   const sales = transactions.filter(tx => tx.adCampaignId === c.id && isAdSale(tx));
   const expenses = transactions.filter(tx => tx.adCampaignId === c.id && isAdSpend(tx));
   const sum = (rows, key) => money(rows.reduce((s, r) => s + r[key], 0));
-  const spend = sum(expenses, 'amount'), revenue = sum(sales, 'amount'), grossProfit = sum(sales, 'profit');
+  const spend = sum(expenses, 'amount'), revenue = sum(sales, 'amount'), grossProfit = money(sales.reduce((sum, sale) => sum + saleProfit(sale), 0));
   const qty = sales.reduce((s, r) => s + r.qty, 0);
   // For installments, subtract the entire sale cost before reserving any received cash.
-  const cashMargin = money(sales.reduce((s, r) => s + r.profit - (r.type === 'installment' ? Math.max(0, r.amount - (r.paidAmount || 0)) : 0), 0));
+  const cashMargin = money(sales.reduce((s, r) => s + saleProfit(r) - (r.type === 'installment' ? Math.max(0, r.amount - (r.paidAmount || 0)) : 0), 0));
   const net = money(grossProfit - spend), cashNet = money(cashMargin - spend);
   const fixedReserve = money(sales.reduce((sum, tx) => sum + (tx.adReservePerUnit ?? c.reservePerUnit ?? 0) * tx.qty, 0));
   const percentReserve = c.reservePerUnit == null ? money(Math.max(0, cashNet) * c.reservePercent / 100 * (qty ? sales.filter(tx => tx.adReservePerUnit == null).reduce((sum, tx) => sum + tx.qty, 0) / qty : 0)) : 0;
@@ -84,7 +85,7 @@ export function productAdMetrics(product, campaigns, transactions, today) {
   const linked = campaigns.filter(c => campaignHasProduct(c, product.id));
   const sales = transactions.filter(tx => isAdSale(tx) && saleMatchesProduct(tx, product));
   const spend = money(linked.reduce((sum, c) => sum + transactions.filter(tx => isAdSpend(tx) && tx.adCampaignId === c.id).reduce((total, tx) => total + (adSpendAllocations(tx, c).find(a => a.productId === product.id)?.amount || 0), 0), 0));
-  const profit = money(sales.reduce((s, tx) => s + tx.profit, 0));
+  const profit = money(sales.reduce((s, tx) => s + saleProfit(tx), 0));
   return { linked, spend, profit, net: money(profit - spend) };
 }
 export function validateAdsBackup(campaigns, transactions, products) {

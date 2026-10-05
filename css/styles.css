@@ -2733,3 +2733,8 @@ html { background: var(--bg); }
 .shipment-allocation-totals { display: flex; flex-wrap: wrap; gap: 12px 24px; }
 .shipment-allocation-totals strong { display: block; font-size: 24px; color: var(--navy); }
 .shipment-allocation details { overflow-wrap: anywhere; }
+
+/* Keep wide profit details scrollable on narrow screens. */
+.profit-table-wrap { max-width: 100%; overflow-x: auto; }
+.profit-table-wrap table { min-width: 1180px; }
+.profit-table-wrap th { white-space: nowrap; }

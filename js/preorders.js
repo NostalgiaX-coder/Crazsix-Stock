@@ -21,6 +21,8 @@ export function validatePreorder(order, validDate) {
     ["contact", "color", "size", "note"].every(key => textValid(order[key])) &&
     ["new", "used"].includes(order.type) && Object.hasOwn(preorderStatuses, order.status) &&
     Number.isSafeInteger(order.qty) && order.qty > 0 &&
+    (order.unitCost == null || amountValid(order.unitCost)) &&
+    (order.internationalShipping == null || amountValid(order.internationalShipping)) &&
     amountValid(order.unitPrice) && order.unitPrice > 0 && amountValid(preorderTotal(order)) &&
     amountValid(order.paidAmount) && order.paidAmount <= preorderTotal(order) &&
     amountValid(order.refundedAmount) &&
@@ -39,7 +41,9 @@ export function preorderDetails(data, paidAmount, validDate) {
   check(amountValid(paidAmount) && paidAmount <= money(qty * unitPrice), "ยอดรับเงินต้องไม่เกินยอดสั่งซื้อ");
   check(!details.dueDate || validDate(details.dueDate), "วันนัดส่งไม่ถูกต้อง");
   check(["new", "used"].includes(data.type), "กรุณาระบุสภาพสินค้า");
-  return { ...details, qty, unitPrice, type: data.type };
+  const unitCost = Number(data.unitCost || 0), internationalShipping = Number(data.internationalShipping || 0);
+  check(amountValid(unitCost) && amountValid(money(unitCost * qty)) && amountValid(internationalShipping), "ต้นทุนและค่าขนส่งระหว่างประเทศต้องตั้งแต่ 0 และมีทศนิยมไม่เกิน 2 ตำแหน่ง");
+  return { ...details, qty, unitPrice, unitCost, internationalShipping, type: data.type };
 }
 
 export function createPreorder(state, data, context) {
@@ -79,6 +83,8 @@ export function updatePreorder(state, id, action, data, context) {
     check(preorderBalance(order) === 0, "ต้องรับชำระครบก่อนส่งมอบสินค้า");
     const shipping = Number(data.shipping || 0), commission = Number(data.commission || 0);
     check(amountValid(shipping) && amountValid(commission), "ค่าส่งและค่ากลางต้องตั้งแต่ 0 และมีทศนิยมไม่เกิน 2 ตำแหน่ง");
+    const internationalShipping = Number(data.internationalShipping ?? order.internationalShipping ?? 0);
+    check(amountValid(internationalShipping), "ค่าขนส่งระหว่างประเทศไม่ถูกต้อง");
     let unitCost, variant;
     if (data.source === "stock") {
       variant = state.products.flatMap(product => product.variants).find(item => item.id === data.variantId);
@@ -93,20 +99,23 @@ export function updatePreorder(state, id, action, data, context) {
     // Validate everything before touching inventory or the ledger.
     if (variant) variant.qty -= order.qty;
     if (!variant && !data.costRecorded && unitCost > 0) recordCash(state, order, money(unitCost * order.qty), "expense", "ต้นทุน pre-order", context);
+    if (internationalShipping > 0) recordCash(state, order, internationalShipping, "expense", "ค่าขนส่งระหว่างประเทศ pre-order", context);
     if (shipping > 0) recordCash(state, order, shipping, "expense", "ค่าส่ง pre-order", context);
     if (commission > 0) recordCash(state, order, commission, "expense", "ค่ากลาง pre-order", context);
     state.transactions.unshift({
       id: context.uid(), type: "preorder", category: "ขายสินค้า", preorderId: order.id,
       desc: `${order.name} ×${order.qty} — ${order.customer} (pre-order)${variant && measurementLabel(variant) ? " · " + measurementLabel(variant) : ""}`,
       date: context.today, amount: preorderTotal(order), qty: order.qty, unitPrice: order.unitPrice, productName: order.name,
-      unitCost, shipping, commission, productId: variant?.id || null,
+      unitCost, shipping, commission, internationalShipping, deliveryStatus: "pending", customerNote: [order.customer, order.contact, order.note].filter(Boolean).join(" · "), productId: variant?.id || null,
       ...(variant ? measurementsOf(variant) : {}),
       ...(variant ? { stockProductId: state.products.find(p => p.variants.some(v => v.id === variant.id)).id } : {}),
-      profit: money(preorderTotal(order) - unitCost * order.qty - shipping - commission),
+      profit: money(preorderTotal(order) - unitCost * order.qty - shipping - commission - internationalShipping),
     });
+    order.unitCost = unitCost;
+    order.internationalShipping = internationalShipping;
     order.status = "completed";
     order.fulfilledAt = context.today;
-    order.fulfillment = { source: data.source, variantId: variant?.id || null, unitCost, shipping, commission, costRecorded: Boolean(data.costRecorded) };
+    order.fulfillment = { source: data.source, variantId: variant?.id || null, unitCost, shipping, commission, internationalShipping, costRecorded: Boolean(data.costRecorded) };
   } else {
     throw new Error("ไม่รู้จักการดำเนินการนี้");
   }

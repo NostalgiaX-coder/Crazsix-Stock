@@ -69,7 +69,7 @@ test('customer preorders remain separate from supplier purchases throughout depo
   await expect(page.locator('[data-txdel]:visible')).toHaveCount(1);
   await page.locator('[data-txdel]:visible').click();
   await expect(page.locator('[data-preorder]:visible')).toHaveCount(1);
-  await expect(page.locator('[data-preorder]:visible')).toContainText('ส่งมอบแล้ว');
+  await expect(page.locator('[data-preorder]:visible')).toContainText('ย้ายไปจัดส่งแล้ว');
   expect(errors).toEqual([]);
 });
 
@@ -277,4 +277,30 @@ test('a changed payment during cancellation confirmation requires a new review',
   expect(db.preorders[0]).toMatchObject({ status: 'awaiting', paidAmount: 200, refundedAmount: 0 });
   expect(db.transactions.filter(tx => tx.type === 'expense')).toEqual([]);
   expect(await page.evaluate(() => window.__testWrites.length)).toBe(0);
+});
+
+test('preorder costs carry into a paid order awaiting shipment without duplicate receipts', async ({ page }) => {
+  await boot(page, seeded({ status: 'ready', paidAmount: 500, unitCost: 100, internationalShipping: 60 }));
+  await nav(page, 'preorder');
+  await page.locator('.preorder-delivery summary').click();
+  const form = page.locator('.preorder-fulfill');
+  await expect(form.locator('[name="unitCost"]')).toHaveValue('100');
+  await expect(form.locator('[name="internationalShipping"]')).toHaveValue('60');
+  await form.locator('[type="submit"]').click();
+  await page.locator('#modal-ok-btn').click();
+  await expectSaved(page, db => db.preorders[0].status === 'completed');
+  const db = await snapshot(page);
+  expect(db.transactions.find(tx => tx.type === 'preorder')).toMatchObject({ deliveryStatus: 'pending', internationalShipping: 60, profit: 240 });
+  expect(db.transactions.filter(tx => tx.type === 'income').reduce((sum, tx) => sum + tx.amount, 0)).toBe(500);
+  await nav(page, 'shipments');
+  await expect(page.locator('#tab-content')).toContainText('เสื้อพรีลูกค้า');
+  await expect(page.locator('[data-cancel-sale]')).toHaveCount(0);
+  await page.locator('.shipment-select').check();
+  await page.locator('#shipment-cost').fill('30');
+  await page.locator('#shipment-submit').click();
+  await page.locator('#modal-ok-btn').click();
+  await expectSaved(page, db => db.shipments.length === 1);
+  const sent = await snapshot(page);
+  expect(sent.transactions.find(tx => tx.type === 'preorder')).toMatchObject({ deliveryStatus: 'shipped', profit: 210, shipping: 30 });
+  expect(sent.products).toEqual(db.products);
 });

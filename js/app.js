@@ -1,3 +1,5 @@
+import { renderProfitTab, wireProfitTab } from "./profit-ui.js";
+import { personalUseAmount, saleProfit } from "./sale-finance.js";
 import { cancelledSaleFor, activeAccountingTransactions, deliveryLabels, pendingDeliveries, validateShipments, applyShipmentAction, validPersonalPercent } from "./shipments.js";
 import { renderShipments, wireShipments, renderShipmentAllocation } from "./shipments-ui.js";
 import { reconcileAutomaticAds, campaignProductIds, campaignHasProduct, campaignUntilBudget, productAdMetrics, validateAdsBackup, validateAdWallet, applyAdAction, isAdSpend } from "./ads.js";
@@ -23,6 +25,7 @@ const STORE_NAMES = ["products", "transactions", "pendingOrders", "preorders", "
 let preorderSearch = "";
 let preorderFilter = "open";
 let activeTab = "home";
+const profitFilter = { from: "", to: "" };
 let loaded = false;
 let loadError = false;
 let stockSearch = "";
@@ -668,7 +671,8 @@ function monthSummary(key) {
   const expense = list
     .filter((t) => t.type === "expense")
     .reduce((s, t) => s + t.amount, 0);
-  return { income, expense, profit: income - expense };
+  const personalUse = money(list.filter(tx => tx.category === "ขายสินค้า" && Number.isFinite(tx.profit)).reduce((sum, tx) => sum + personalUseAmount(tx), 0));
+  return { income, expense, profit: income - expense, personalUse };
 }
 function variantStats(variantId) {
   const sales = transactions.filter(
@@ -693,13 +697,13 @@ function productAggregateStats(productId) {
 }
 function summarizeSales(sales) {
   const totalQtySold = sales.reduce((s, t) => s + (t.qty || 0), 0);
-  const totalProfit = sales.reduce((s, t) => s + (t.profit || 0), 0);
+  const totalProfit = sales.reduce((s, t) => s + saleProfit(t), 0);
   const byMonth = {};
   sales.forEach((t) => {
     const k = monthKey(t.date);
     if (!byMonth[k]) byMonth[k] = { qty: 0, profit: 0 };
     byMonth[k].qty += t.qty || 0;
-    byMonth[k].profit += t.profit || 0;
+    byMonth[k].profit += saleProfit(t);
   });
   const months = Object.keys(byMonth)
     .sort()
@@ -714,7 +718,7 @@ function topSellers(limit, sortBy) {
     const key = product?.id || tx.productName || tx.productId || tx.desc;
     const item = map.get(key) || { name: product?.name || tx.productName || tx.desc || "สินค้าที่นำออกจากสต็อก", qty: 0, profit: 0 };
     item.qty += tx.qty || 0;
-    item.profit += tx.profit || 0;
+    item.profit += saleProfit(tx);
     map.set(key, item);
   });
   return [...map.values()]
@@ -1673,6 +1677,7 @@ const tabMeta = {
     "receipt",
     "ดูแลทุกรายรับ และทุกรายจ่าย",
   ],
+  profit: ["กำไรจากการขาย", "กำไร", "chart", "เปรียบเทียบกำไรก่อนและหลังหักค่าใช้จ่ายของแต่ละรายการขาย"],
   report: [
     "รายงานและสถิติ",
     "รายงาน",
@@ -1785,7 +1790,7 @@ function render() {
     <main class="main-content" id="main-content">
       <div class="topbar"><div class="breadcrumb">Workspace <span>/</span> <strong>${meta[1]}</strong></div><div class="topbar-right">${themeToggle()}<span class="sync-status"><span class="online-dot"></span>เชื่อมต่อแล้ว</span><span class="topbar-date">${icon("calendar")}${dateLabel}</span><span class="avatar avatar-small">C</span></div></div>
       <header class="page-header"><div><p class="eyebrow">${activeTab === "home" ? "YOUR STORE, AT A GLANCE" : "CRAZSIX STORE"}</p><h1>${meta[0]}<span class="heading-dot">.</span></h1><p class="subline">${meta[3]}</p></div><div class="header-actions"><button class="btn btn-ghost" data-go="stock" data-workspace="add">${icon("plus")}เพิ่มสินค้า</button><button class="btn btn-primary" data-go="sell">${icon("bag")}บันทึกการขาย</button></div></header>
-      ${activeTab === "home" ? `<section class="stats" aria-label="สรุปร้านเดือนนี้">${metric("มูลค่าสต็อก", fmtMoney(stockValue()), `${products.length} สินค้า · คงเหลือ ${totalQty.toLocaleString("th-TH")} ชิ้น`, "box")}${metric("รายรับเดือนนี้", fmtMoney(ms.income), "ไม่รวมยอดขายและ pre-order ที่ยกเลิก", "up", "income-stat")}${metric("รายจ่ายเดือนนี้", fmtMoney(ms.expense), "รวมต้นทุนและค่าใช้จ่าย ไม่รวมเงินคืนรายการยกเลิก", "down", "expense-stat")}${metric("เงินสุทธิเดือนนี้", fmtMoney(ms.profit), "รายรับ − รายจ่าย", "wallet", "profit")}</section>` : ""}
+      ${activeTab === "home" ? `<section class="stats" aria-label="สรุปร้านเดือนนี้">${metric("มูลค่าสต็อก", fmtMoney(stockValue()), `${products.length} สินค้า · คงเหลือ ${totalQty.toLocaleString("th-TH")} ชิ้น`, "box")}${metric("รายรับเดือนนี้", fmtMoney(ms.income), "ไม่รวมยอดขายและ pre-order ที่ยกเลิก", "up", "income-stat")}${metric("รายจ่ายเดือนนี้", fmtMoney(ms.expense), "รวมต้นทุนและค่าใช้จ่าย ไม่รวมเงินคืนรายการยกเลิก", "down", "expense-stat")}${metric("แบ่งใช้ส่วนตัวเดือนนี้", fmtMoney(ms.personalUse), "ตามยอดขายเดือนนี้ รวมรายการผ่อน · หักออกจากกำไรขายแล้ว", "wallet", "personal-use-stat")}${metric("เงินสุทธิเดือนนี้", fmtMoney(ms.profit), "รายรับ − รายจ่าย", "wallet", "profit")}</section>` : ""}
       <div id="tab-content" class="tab-content"></div>
       <footer><span>CRAZSIX <span class="footer-dot">•</span> Your everyday store companion</span><details class="data-tools"><summary>จัดการข้อมูล ${icon("chevron")}</summary><div class="footer-actions"><button id="export-btn">${icon("download")}สำรองข้อมูล</button><button id="import-btn">${icon("upload")}นำเข้าข้อมูล</button><button data-export="inventory">ส่งออกสต็อก CSV</button><button data-export="transactions">ส่งออกบัญชี CSV</button><button data-export="preorders">ส่งออก pre-order CSV</button><button id="reset-btn" class="danger-text">ล้างข้อมูลทั้งหมด</button></div></details><input type="file" id="import-input" accept=".json,application/json" hidden></footer>
     </main>`;
@@ -1816,8 +1821,10 @@ function render() {
   else if (activeTab === "installment")
     content.innerHTML = renderInstallmentsTab();
   else if (activeTab === "tx") content.innerHTML = renderTxTab();
+  else if (activeTab === "profit") content.innerHTML = renderProfitTab(profitFilter, { esc: escapeHtml });
   else if (activeTab === "report") content.innerHTML = renderRangeReport() + renderReportTab();
   else content.innerHTML = renderAiTab();
+  wireProfitTab(activeAccountingTransactions(transactions, preorders), profitFilter, { fmt: fmtMoney, esc: escapeHtml, metric, isAdSpend, isManualTransaction });
   wireAdsTab();
   wireShipmentsTab();
   wireTasksTab();
@@ -3548,7 +3555,7 @@ function renderSellTab() {
         <div class="field"><label>แบ่งยิงแอดต่อ (บาท/ชิ้น)</label><input class="sell-ad-reserve" type="number" min="0" max="1000000000000" step="0.01" placeholder="ใช้ค่าที่ตั้งในแคมเปญ" disabled></div>
         <p class="hint sell-ad-preview" aria-live="polite"></p>
         <div class="field"><label>แบ่งเงินใช้ส่วนตัว (% ของยอดขายเต็ม)</label><input class="sell-personal-percent" type="number" min="0" max="100" step="0.01" value="0" aria-label="เปอร์เซ็นต์เงินใช้ส่วนตัว"><p class="hint sell-personal-preview" aria-live="polite"></p></div>
-        <div class="sale-total" aria-live="polite"><span>ยอดขายรวม / กำไรประมาณ</span><b class="sale-total-value"></b></div>
+        <div class="sale-total" aria-live="polite"><span>ยอดขายรวม / กำไรหลังแบ่งใช้ส่วนตัว</span><b class="sale-total-value"></b></div>
         <button class="btn btn-gold btn-sm sell-submit" style="width:100%; margin-top:10px;" data-sell="${first.id}">${icon("bag")}บันทึกการขาย</button>
         <div class="checkline" style="margin-top:10px;"><input type="checkbox" class="sell-installment"><label>ลูกค้าผ่อนชำระ (ไม่ได้เงินก้อนเดียว)</label></div>
         <div class="field sell-installment-fields" style="display:none; margin-top:6px;"><label>ผ่อนชำระให้ครบภายใน (วัน)</label><input class="sell-due-days" type="number" min="1" value="30"><label style="margin-top:6px;">มัดจำที่ได้รับตอนนี้ (ถ้ามี)</label><input class="sell-deposit" type="number" min="0" step="0.01" value="0"></div><div class="field"><label>ลูกค้า / ผู้รับ / เลขคำสั่งซื้อ (ถ้ามี)</label><input class="sell-customer" type="text" maxlength="2000" placeholder="เช่น ชื่อลูกค้า, เบอร์โทร"><p class="hint">บันทึกการขายแล้วจะอยู่ในสถานะรอส่ง</p></div>
@@ -3611,15 +3618,16 @@ function wireSellTab() {
     if (!found) return;
     const qty = Number(card.querySelector(".sell-qty").value) || 0,
       price = Number(card.querySelector(".sell-price-input").value) || 0;
+    const personalPercent = Number(card.querySelector(".sell-personal-percent").value);
     const total = qty * price,
       profit =
         total -
         qty * found.variant.cost -
         (Number(card.querySelector(".sell-shipping").value) || 0) -
-        (Number(card.querySelector(".sell-commission").value) || 0);
+        (Number(card.querySelector(".sell-commission").value) || 0) -
+        (validPersonalPercent(personalPercent) ? personalUseAmount({ amount: total, personalUsePercent: personalPercent }) : 0);
     card.querySelector(".sale-total-value").textContent =
       `${fmtMoney(total)} / ${fmtMoney(profit)}`;
-    const personalPercent = Number(card.querySelector(".sell-personal-percent").value);
     card.querySelector(".sell-personal-preview").textContent = validPersonalPercent(personalPercent)
       ? `แบ่งใช้ส่วนตัว ${fmtMoney(money(total * personalPercent / 100))} (${personalPercent}% ของยอดขายก่อนหักค่าใช้จ่าย) · แจ้งยอดตามจำนวนที่ส่งในแต่ละครั้ง`
       : "กรอกเปอร์เซ็นต์ 0–100 ทศนิยมไม่เกิน 2 ตำแหน่ง";
@@ -3997,7 +4005,8 @@ function renderReportTab() {
       <td class="num">${fmtMoney(t.unitCost)}</td>
       <td class="num">${fmtMoney(t.shipping || 0)}</td>
       <td class="num">${fmtMoney(t.commission || 0)}</td>
-      <td class="num" style="color:${t.profit < 0 ? "var(--red)" : "var(--green)"}; font-weight:700;">${fmtMoney(t.profit)}</td>
+      <td class="num">${fmtMoney(personalUseAmount(t))}</td>
+      <td class="num" style="color:${saleProfit(t) < 0 ? "var(--red)" : "var(--green)"}; font-weight:700;">${fmtMoney(saleProfit(t))}</td>
     </tr>
   `,
     )
@@ -4009,9 +4018,9 @@ function renderReportTab() {
       : `
     <div class="panel">
       <h2>กำไรตามรายการขาย</h2>
-      <p class="hint">กำไรจากการขาย = (ราคาขายจริง − ต้นทุน) × จำนวน − ค่าส่ง − ค่ากลาง ยังไม่หักค่าใช้จ่ายทั่วไป</p>
+      <p class="hint">กำไรจากการขาย = (ราคาขายจริง − ต้นทุน) × จำนวน − ค่าส่ง − ค่ากลาง − เงินแบ่งใช้ส่วนตัว (คิดจากยอดขายเต็ม) ยังไม่หักค่าใช้จ่ายทั่วไป</p>
       <table>
-        <thead><tr><th>วันที่</th><th>รายการ</th><th class="num">จำนวน</th><th class="num">ราคาขาย/ชิ้น</th><th class="num">ต้นทุน/ชิ้น</th><th class="num">ค่าส่ง</th><th class="num">ค่ากลาง</th><th class="num">กำไรจากการขาย</th></tr></thead>
+        <thead><tr><th>วันที่</th><th>รายการ</th><th class="num">จำนวน</th><th class="num">ราคาขาย/ชิ้น</th><th class="num">ต้นทุน/ชิ้น</th><th class="num">ค่าส่ง</th><th class="num">ค่ากลาง</th><th class="num">แบ่งใช้ส่วนตัว</th><th class="num">กำไรจากการขาย</th></tr></thead>
         <tbody>${saleRows}</tbody>
       </table>
     </div>
@@ -4242,7 +4251,7 @@ function renderLocalInsights() {
     };
     item.qty += Number(sale.qty) || 0;
     item.revenue += Number(sale.amount) || 0;
-    item.profit += Number(sale.profit) || 0;
+    item.profit += saleProfit(sale);
     sellers.set(key, item);
   });
   const ranked = [...sellers.values()].sort((a, b) => b.qty - a.qty);
@@ -4370,6 +4379,8 @@ function preorderFields(order = {}) {
     <div class="field"><label>สภาพสินค้า</label><select name="type"><option value="new">มือหนึ่ง</option><option value="used" ${order.type === "used" ? "selected" : ""}>มือสอง</option></select></div>
     ${field("qty", "จำนวน", "number", 'required min="1" step="1"', order.qty ?? 1)}
     ${field("unitPrice", "ราคาขายต่อชิ้น (บาท)", "number", 'required min="0.01" max="1000000000000" step="0.01"')}
+    ${field("unitCost", "ต้นทุนสินค้าต่อชิ้น (บาท)", "number", 'min="0" step="0.01"', order.unitCost ?? 0)}
+    ${field("internationalShipping", "ค่าขนส่งระหว่างประเทศรวม (บาท)", "number", 'min="0" step="0.01"', order.internationalShipping ?? 0)}
     ${field("dueDate", "วันนัดส่ง (ไม่บังคับ)", "date")}
     ${field("note", "หมายเหตุ / ที่อยู่จัดส่ง", "text", 'maxlength="2000"')}`;
 }
@@ -4383,7 +4394,7 @@ function renderPreordersTab() {
     ${metric("ยอดรอรับชำระ", fmtMoney(open.reduce((sum, order) => sum + preorderBalance(order), 0)), "เฉพาะ pre-order ที่ยังเปิดอยู่", "wallet")}
     ${metric("เกินวันนัดส่ง", overdue.length, "ควรติดต่อแจ้งลูกค้า", "clock", overdue.length ? "expense-stat" : "")}
     </section>
-    <div class="panel preorder-intro"><h2>รับพรีจากลูกค้า</h2><p class="hint">ใช้เมื่อมีลูกค้าสั่งสินค้ากับร้าน รับเงินได้หลายครั้งและติดตามจนส่งมอบ ส่วนสินค้าที่ร้านซื้อมาเก็บขายเองให้ใช้ “สั่งซื้อรอรับของ” ในหน้าสต็อก</p><p class="hint">รับจองยังไม่หักหรือกันสต็อก ยอดมัดจำเข้าบัญชีเมื่อรับเงินจริง และนับยอดขาย/กำไรเมื่อส่งมอบเท่านั้น</p>
+    <div class="panel preorder-intro"><h2>รับพรีจากลูกค้า</h2><p class="hint">ใช้เมื่อมีลูกค้าสั่งสินค้ากับร้าน รับเงินได้หลายครั้งและติดตามจนส่งมอบ ส่วนสินค้าที่ร้านซื้อมาเก็บขายเองให้ใช้ “สั่งซื้อรอรับของ” ในหน้าสต็อก</p><p class="hint">รับจองยังไม่หักหรือกันสต็อก ยอดมัดจำเข้าบัญชีเมื่อรับเงินจริง และนับยอดขาย/กำไรเมื่อย้ายไปเมนูรอส่ง</p>
     <details id="preorder-create"><summary>+ เพิ่ม pre-order ลูกค้า</summary><form id="preorder-form"><div class="form-grid">${preorderFields()}<div class="field"><label>มัดจำที่รับแล้ว (บาท)</label><input name="deposit" type="number" min="0" step="0.01" value="0" required></div></div><p class="hint" id="preorder-quote" aria-live="polite">ระบุจำนวนและราคาต่อชิ้นเพื่อคำนวณยอด</p><button class="btn btn-primary" type="submit">บันทึก pre-order</button></form></details></div>
     <div class="panel"><div class="section-heading"><h2>รายการ pre-order ลูกค้า</h2></div><div class="preorder-filters"><div class="field"><label for="preorder-search">ค้นหาลูกค้า สินค้า หรือรหัสรายการ</label><input id="preorder-search" type="search" value="${escapeHtml(preorderSearch)}" placeholder="ชื่อลูกค้า เบอร์โทร สินค้า…"></div><div class="field"><label for="preorder-filter">สถานะ</label><select id="preorder-filter">${Object.entries({ open: "รายการที่ยังเปิดอยู่", all: "ทุกสถานะ", overdue: "เกินวันนัดส่ง", ...preorderStatuses }).map(([value, label]) => `<option value="${value}" ${preorderFilter === value ? "selected" : ""}>${label}</option>`).join("")}</select></div><button id="preorder-clear" class="btn btn-ghost" type="button">ล้างตัวกรอง</button></div><p class="hint" id="preorder-count" role="status"></p>
     <div class="preorder-list">${sorted.map(order => {
@@ -4391,14 +4402,14 @@ function renderPreordersTab() {
       const id = escapeHtml(order.id);
       const cash = transactions.filter(tx => tx.preorderId === order.id && ["income", "expense"].includes(tx.type));
       return `<article class="preorder-card ${late ? "preorder-late" : ""}" data-preorder="${id}">
-        <div class="preorder-heading"><div><p class="eyebrow">PO · ${id}</p><h3>${escapeHtml(order.customer)}</h3><p>${escapeHtml(order.name)} · ${escapeHtml([order.color, order.size, order.type === "used" ? "มือสอง" : "มือหนึ่ง"].filter(Boolean).join(" / "))} ×${order.qty}</p></div><span class="tag ${order.status === "completed" ? "income" : order.status === "cancelled" ? "expense" : "preorder"}">${preorderStatuses[order.status]}</span></div>
+        <div class="preorder-heading"><div><p class="eyebrow">PO · ${id}</p><h3>${escapeHtml(order.customer)}</h3><p>${escapeHtml(order.name)} · ${escapeHtml([order.color, order.size, order.type === "used" ? "มือสอง" : "มือหนึ่ง"].filter(Boolean).join(" / "))} ×${order.qty}</p></div><span class="tag ${order.status === "completed" ? "income" : order.status === "cancelled" ? "expense" : "preorder"}">${order.status === "completed" && transactions.some(tx => tx.preorderId === order.id && tx.deliveryStatus) ? "ย้ายไปจัดส่งแล้ว" : preorderStatuses[order.status]}</span></div>
         <p class="hint">${escapeHtml(order.contact || "ไม่ได้ระบุช่องทางติดต่อ")} · รับจอง ${order.createdAt} · นัดส่ง ${order.dueDate || "ยังไม่ระบุ"}${late ? " · เกินกำหนดนัดส่ง" : ""}</p>
         ${order.note ? `<p class="preorder-note">${escapeHtml(order.note)}</p>` : ""}
         <div class="preorder-totals"><span>ยอดสั่งซื้อ<strong>${fmtMoney(preorderTotal(order))}</strong></span><span>รับแล้ว<strong>${fmtMoney(order.paidAmount)}</strong></span><span>${order.status === "cancelled" ? "คืนเงินแล้ว" : "ค้างชำระ"}<strong>${fmtMoney(order.status === "cancelled" ? order.refundedAmount : preorderBalance(order))}</strong></span></div>
-        ${isOpen ? `<div class="preorder-actions">${order.status !== "ready" ? `<button class="btn btn-primary btn-sm" data-preorder-action="status">${order.status === "awaiting" ? "ยืนยันว่าสั่งให้ลูกค้าแล้ว" : "สินค้าพร้อมส่งมอบแล้ว"}</button>` : ""}<button class="btn btn-ghost btn-sm danger-text" data-preorder-action="cancel">ยกเลิก${order.paidAmount ? "และบันทึกคืนเงิน" : "รายการ"}</button></div>
+        ${isOpen ? `<div class="preorder-actions">${order.status !== "ready" ? `<button class="btn btn-primary btn-sm" data-preorder-action="status">${order.status === "awaiting" ? "ยืนยันว่าสั่งให้ลูกค้าแล้ว" : "สินค้าถึงร้านแล้ว"}</button>` : ""}<button class="btn btn-ghost btn-sm danger-text" data-preorder-action="cancel">ยกเลิก${order.paidAmount ? "และบันทึกคืนเงิน" : "รายการ"}</button></div>
         ${preorderBalance(order) > 0 ? `<form class="preorder-payment preorder-inline"><div class="field"><label>รับชำระเพิ่ม (บาท)</label><input name="amount" type="number" min="0.01" max="${preorderBalance(order)}" step="0.01" required></div><button class="btn btn-primary btn-sm" type="submit">บันทึกรับเงิน</button></form>` : '<p class="hint">ชำระครบแล้ว</p>'}
         <details><summary>แก้ไขข้อมูลการจอง</summary><form class="preorder-edit"><div class="form-grid">${preorderFields(order)}</div><p class="hint">ยอดสั่งซื้อใหม่ต้องไม่น้อยกว่ายอดที่รับเงินแล้ว</p><button class="btn btn-ghost" type="submit">บันทึกการแก้ไข</button></form></details>
-        ${order.status === "ready" ? `<details class="preorder-delivery"><summary>ส่งมอบสินค้าและปิดรายการ</summary><form class="preorder-fulfill"><p class="hint">ต้องรับเงินครบก่อนส่งมอบ การส่งมอบจะบันทึกยอดขายและกำไร โดยไม่รับเงินซ้ำ</p><div class="form-grid"><div class="field"><label>วิธีส่งมอบ</label><select name="source"><option value="direct">ของที่จัดหาเฉพาะลูกค้า (ไม่ผ่านสต็อก)</option><option value="stock">นำสินค้าจากสต็อกของร้าน</option></select></div><div class="field preorder-stock-field" hidden><label>สินค้าที่ตัดสต็อก</label><select name="variantId" disabled required><option value="">เลือกสินค้า สี และไซส์ให้ตรงกับรายการจอง</option>${options}</select></div><div class="field preorder-direct-field"><label>ต้นทุนจริงต่อชิ้น (บาท)</label><input name="unitCost" type="number" min="0" step="0.01" required></div><div class="field"><label>ค่าส่งที่ร้านจ่าย (บาท)</label><input name="shipping" type="number" min="0" step="0.01" value="0" required></div><div class="field"><label>ค่ากลาง (บาท)</label><input name="commission" type="number" min="0" step="0.01" value="0" required></div></div><label class="preorder-cost-check preorder-direct-field"><input type="checkbox" name="costRecorded"> บันทึกรายจ่ายต้นทุนสินค้านี้ในบัญชีไปแล้ว</label><p class="hint">หากยังไม่เคยลงต้นทุน ระบบจะลงรายจ่ายวันนี้เมื่อส่งมอบ ค่าส่งและค่ากลางจะลงเพิ่มตามจำนวนที่ระบุ</p><button type="submit" class="btn btn-primary">ยืนยันส่งมอบสินค้า</button></form></details>` : ""}` : ""}
+        ${order.status === "ready" ? `<details class="preorder-delivery"><summary>ของถึงแล้ว · ย้ายไปเมนูรอส่ง</summary><form class="preorder-fulfill"><p class="hint">ต้องรับเงินครบก่อนย้ายไปรอส่ง ระบบจะบันทึกยอดขายและกำไร โดยไม่รับเงินซ้ำ</p><div class="form-grid"><div class="field"><label>วิธีส่งมอบ</label><select name="source"><option value="direct">ของที่จัดหาเฉพาะลูกค้า (ไม่ผ่านสต็อก)</option><option value="stock">นำสินค้าจากสต็อกของร้าน</option></select></div><div class="field preorder-stock-field" hidden><label>สินค้าที่ตัดสต็อก</label><select name="variantId" disabled required><option value="">เลือกสินค้า สี และไซส์ให้ตรงกับรายการจอง</option>${options}</select></div><div class="field preorder-direct-field"><label>ต้นทุนจริงต่อชิ้น (บาท)</label><input name="unitCost" type="number" min="0" step="0.01" value="${order.unitCost ?? 0}" required></div><div class="field"><label>ค่าขนส่งระหว่างประเทศรวม (บาท)</label><input name="internationalShipping" type="number" min="0" step="0.01" value="${order.internationalShipping ?? 0}" required></div><div class="field"><label>ค่าส่งที่ร้านจ่าย (บาท)</label><input name="shipping" type="number" min="0" step="0.01" value="0" required></div><div class="field"><label>ค่ากลาง (บาท)</label><input name="commission" type="number" min="0" step="0.01" value="0" required></div></div><label class="preorder-cost-check preorder-direct-field"><input type="checkbox" name="costRecorded"> บันทึกรายจ่ายต้นทุนสินค้านี้ในบัญชีไปแล้ว</label><p class="hint">หากยังไม่เคยลงต้นทุน ระบบจะลงรายจ่ายวันนี้เมื่อย้ายไปรอส่ง ค่าขนส่งระหว่างประเทศ ค่าส่ง และค่ากลางจะลงเพิ่มตามจำนวนที่ระบุ</p><button type="submit" class="btn btn-primary">ยืนยันของถึงและชำระครบ · ย้ายไปรอส่ง</button></form></details>` : ""}` : ""}
         ${cash.length ? `<details><summary>ประวัติรับเงินและค่าใช้จ่าย (${cash.length})</summary><ul class="preorder-history">${cash.map(tx => `<li><span>${escapeHtml(tx.date)} · ${escapeHtml(tx.category)}</span><strong>${tx.type === "income" ? "+" : "−"}${fmtMoney(tx.amount)}</strong></li>`).join("")}</ul></details>` : ""}
       </article>`;
     }).join("")}</div><div class="empty" id="preorder-empty" hidden><div class="big">ไม่พบรายการ pre-order</div>เพิ่มรายการใหม่ หรือลองเปลี่ยนคำค้นหาและสถานะ</div></div>`;
@@ -4414,7 +4425,7 @@ async function performPreorderAction(id, action, data = {}) {
       if (!order || !preorderOpen(order)) return;
       if (!(await showConfirm(`ยกเลิก pre-order ของ ${order.customer}${order.paidAmount ? ` และยืนยันว่าได้คืนเงินลูกค้า ${fmtMoney(order.paidAmount)} แล้ว` : ""}? ระบบจะเก็บประวัติรายการไว้`))) return;
     }
-    if (action === "fulfill" && !(await showConfirm("ยืนยันส่งมอบสินค้าให้ลูกค้าแล้ว? ระบบจะบันทึกยอดขาย ต้นทุน และตัดสต็อกตามวิธีที่เลือก"))) return;
+    if (action === "fulfill" && !(await showConfirm("ยืนยันสินค้าถึงร้านและลูกค้าชำระครบแล้ว? ระบบจะย้ายไปเมนูรอส่ง พร้อมบันทึกยอดขาย ต้นทุน และตัดสต็อกตามวิธีที่เลือก"))) return;
     if (reviewedOrder && JSON.stringify(reviewedOrder) !== JSON.stringify(preorders.find(item => item.id === id))) {
       showAlert("รายการเปลี่ยนแปลงระหว่างยืนยัน กรุณาเปิดรายการล่าสุดและตรวจยอดอีกครั้ง");
       return;
@@ -4532,7 +4543,7 @@ function downloadCsv(name, rows) {
   toast("ส่งออก CSV แล้ว");
 }
 function transactionExportRows(rows) {
-  return [["รหัส", "วันที่", "ประเภท", "หมวดหมู่", "รายละเอียด", "ยอดรายการ", "เงินรับจริง", "เงินจ่ายจริง", "จำนวนขาย", "กำไรขายก่อนแอด", "รหัส pre-order", "รหัสแคมเปญแอด"], ...rows.map(tx => [tx.id, tx.date, tx.type, tx.category, tx.desc, tx.amount, tx.type === "income" ? tx.amount : 0, tx.type === "expense" ? tx.amount : 0, tx.deliveryStatus === "cancelled" ? 0 : tx.qty || 0, tx.deliveryStatus === "cancelled" ? "" : tx.profit ?? "", tx.preorderId || "", tx.adCampaignId || ""])];
+  return [["รหัส", "วันที่", "ประเภท", "หมวดหมู่", "รายละเอียด", "ยอดรายการ", "เงินรับจริง", "เงินจ่ายจริง", "จำนวนขาย", "กำไรขายก่อนแอด", "รหัส pre-order", "รหัสแคมเปญแอด", "แบ่งใช้ส่วนตัว"], ...rows.map(tx => [tx.id, tx.date, tx.type, tx.category, tx.desc, tx.amount, tx.type === "income" ? tx.amount : 0, tx.type === "expense" ? tx.amount : 0, tx.deliveryStatus === "cancelled" ? 0 : tx.qty || 0, tx.deliveryStatus === "cancelled" || tx.profit == null ? "" : saleProfit(tx), tx.preorderId || "", tx.adCampaignId || "", tx.category === "ขายสินค้า" ? personalUseAmount(tx) : 0])];
 }
 function wireExportTools() {
   document.querySelectorAll("[data-export]").forEach(button => {
@@ -4549,7 +4560,7 @@ function wireExportTools() {
   });
 }
 function renderRangeReport() {
-  return `<div class="panel"><h2>รายงานตามช่วงวันที่</h2><div class="task-filters"><div class="field"><label>ตั้งแต่วันที่</label><input id="report-from" type="date" value="${reportFrom}"></div><div class="field"><label>ถึงวันที่</label><input id="report-to" type="date" value="${reportTo}"></div><button class="btn btn-ghost" id="report-clear">ทุกช่วงเวลา</button><button class="btn btn-primary" id="report-export">ส่งออกช่วงนี้ CSV</button></div><p class="hint" id="report-range-error" role="status"></p><div id="report-range-summary" class="stats range-stats"></div><p class="hint">ค่าแอดอัตโนมัติในรายงานเป็นประมาณการตามงบต่อวัน จนกว่าจะบันทึกยอดจริงแทน ยอดรายรับ–รายจ่ายไม่รวมรายการที่ลบ ยอดขายและ pre-order ที่ยกเลิก รวมถึงเงินรับและเงินคืนที่เกี่ยวข้อง โดยใช้เกณฑ์เดียวกับสรุปรายเดือน ประวัติการรับและคืนเงินยังดูได้จากรายการที่ยกเลิก กำไรจากการขายคิดเฉพาะยอดขายในช่วงนี้ หักต้นทุนสินค้า ค่าส่ง และค่ากลางแล้ว กำไรหลังแอดหักค่าแอดที่จ่ายในช่วงวันที่เลือกอีกครั้งหนึ่งจากกำไรขาย ยังไม่หักค่าใช้จ่ายทั่วไปของร้าน ตารางและกราฟด้านล่างแสดงกำไรก่อนค่าแอดและเป็นภาพรวมทุกช่วงเวลา</p></div>`;
+  return `<div class="panel"><h2>รายงานตามช่วงวันที่</h2><div class="task-filters"><div class="field"><label>ตั้งแต่วันที่</label><input id="report-from" type="date" value="${reportFrom}"></div><div class="field"><label>ถึงวันที่</label><input id="report-to" type="date" value="${reportTo}"></div><button class="btn btn-ghost" id="report-clear">ทุกช่วงเวลา</button><button class="btn btn-primary" id="report-export">ส่งออกช่วงนี้ CSV</button></div><p class="hint" id="report-range-error" role="status"></p><div id="report-range-summary" class="stats range-stats"></div><p class="hint">ค่าแอดอัตโนมัติในรายงานเป็นประมาณการตามงบต่อวัน จนกว่าจะบันทึกยอดจริงแทน ยอดรายรับ–รายจ่ายไม่รวมรายการที่ลบ ยอดขายและ pre-order ที่ยกเลิก รวมถึงเงินรับและเงินคืนที่เกี่ยวข้อง โดยใช้เกณฑ์เดียวกับสรุปรายเดือน ประวัติการรับและคืนเงินยังดูได้จากรายการที่ยกเลิก กำไรจากการขายคิดเฉพาะยอดขายในช่วงนี้ หักต้นทุนสินค้า ค่าส่ง ค่ากลาง และเงินแบ่งใช้ส่วนตัวแล้ว กำไรหลังแอดหักค่าแอดที่จ่ายในช่วงวันที่เลือกอีกครั้งหนึ่งจากกำไรขาย ยังไม่หักค่าใช้จ่ายทั่วไปของร้าน ตารางและกราฟด้านล่างแสดงกำไรก่อนค่าแอดและเป็นภาพรวมทุกช่วงเวลา</p></div>`;
 }
 function wireRangeReport() {
   const from = document.getElementById("report-from"), to = document.getElementById("report-to");
