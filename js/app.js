@@ -1,3 +1,4 @@
+import { allocateReceiving, prepareReceivingLot, validateReceivingLots } from "./receiving-lots.js";
 import { renderProfitTab, wireProfitTab } from "./profit-ui.js";
 import { personalUseAmount, saleProfit } from "./sale-finance.js";
 import { cancelledSaleFor, activeAccountingTransactions, deliveryLabels, pendingDeliveries, validateShipments, applyShipmentAction, validPersonalPercent } from "./shipments.js";
@@ -488,7 +489,7 @@ function validateBackup(data) {
   const importedPreorders = data.preorders == null ? [] : data.preorders;
   const uniqueIds = rows => rows.every(row => row && typeof row.id === "string" && row.id.trim() && !/[\s<>"\'&]/.test(row.id)) && new Set(rows.map(row => row.id)).size === rows.length;
   const validPreorders = Array.isArray(importedPreorders) && importedPreorders.every(row => validatePreorder(row, validDateString));
-  if (!validProducts || !validTransactions || !validPending || !validPreorders)
+  if (!validProducts || !validTransactions || !validPending || !validPreorders || !validateReceivingLots(data.transactions, importedPreorders))
     throw new Error("พบรายการสินค้า จำนวนเงิน หรือวันที่ไม่ถูกต้องในไฟล์สำรอง");
   const groups = [importedProducts, importedProducts.flatMap(product => product.variants), data.transactions, importedPending, importedPreorders];
   if (!groups.every(uniqueIds)) throw new Error("พบรหัสรายการซ้ำ ว่าง หรือมีอักขระที่ไม่รองรับในไฟล์สำรอง");
@@ -1026,6 +1027,8 @@ function pendingSizeKey(order) {
   return stockOptionKey({ ...order, chestInches: null, lengthInches: null });
 }
 
+const incomingPreorders = () => preorders.filter(order => order.status === "ordered" && (order.receivedQty || 0) < order.qty);
+
 function pendingOrderGroups() {
   const groups = new Map();
   for (const order of pendingOrders) {
@@ -1082,44 +1085,6 @@ async function addPendingOrderBatch(rows, note) {
     });
   }
   await saveData("pendingOrders", ...(rows.some(row => row.productId) ? ["products"] : []), ...(totalCost > 0 ? ["transactions"] : []));
-  render();
-}
-
-async function receivePendingOrder(pendingId, shippingPaid) {
-  return receivePendingOrdersBulk([pendingId], shippingPaid);
-}
-async function receivePendingOrdersBulk(ids, shippingTotal, quantities = {}) {
-  const shipAmt = Number(shippingTotal || 0);
-  const selected = [...new Set(ids)].map(id => pendingOrders.find(order => order.id === id));
-  if (!Number.isFinite(shipAmt) || shipAmt < 0 || Math.abs(shipAmt - money(shipAmt)) > 1e-7) {
-    showAlert("ค่าส่งต้องตั้งแต่ 0 และมีทศนิยมไม่เกิน 2 ตำแหน่ง");
-    return;
-  }
-  if (!selected.length || selected.some(order => !order || !Number.isSafeInteger(Number(quantities[order.id] ?? order.qty)) || Number(quantities[order.id] ?? order.qty) < 1 || Number(quantities[order.id] ?? order.qty) > order.qty)) {
-    showAlert("จำนวนรับต้องเป็นจำนวนเต็มตั้งแต่ 1 และไม่เกินจำนวนที่รอรับ กรุณาตรวจรายการล่าสุด");
-    return;
-  }
-  if (selected.some(po => po.productId && !products.some(p => p.id === po.productId))) {
-    showAlert("สินค้าเดิมของรายการรอรับถูกลบ กรุณากู้คืนสินค้าจากไฟล์สำรองก่อนรับของ");
-    return;
-  }
-  const receivedItems = selected.map(po => {
-    const qty = Number(quantities[po.id] ?? po.qty);
-    const { prod, variant } = addVariantCore({ ...po, name: products.find(p => p.id === po.productId)?.name || po.name, qty });
-    po.originalQty = po.originalQty ?? po.qty;
-    po.receivedQty = (po.receivedQty || 0) + qty;
-    po.qty -= qty;
-    return { prod, variant, qty };
-  });
-  pendingOrders = pendingOrders.filter(order => order.qty > 0);
-  if (shipAmt > 0) {
-    transactions.unshift({
-      id: uid(), type: "expense", category: "ค่าส่งสินค้าเข้า",
-      desc: receivedItems.map(({ prod, variant, qty }) => variantLabel(prod, variant) + " x" + qty).join(", ") + " (ค่าส่งตอนรับของ)",
-      amount: shipAmt, date: todayStr(), productId: null,
-    });
-  }
-  await saveData("products", "pendingOrders", ...(shipAmt > 0 ? ["transactions"] : []));
   render();
 }
 
@@ -1531,13 +1496,14 @@ async function addManualTx(data) {
 }
 
 function isManualTransaction(tx) {
-  return ["income", "expense"].includes(tx.type) && !tx.shipmentId && !tx.saleCancellationId && !tx.adCampaignId && !tx.productId && !tx.installmentId && !tx.preorderId && !tx.items && !tx.pendingIds && tx.profit == null &&
+  return ["income", "expense"].includes(tx.type) && !tx.receivingLot && !tx.shipmentId && !tx.saleCancellationId && !tx.adCampaignId && !tx.productId && !tx.installmentId && !tx.preorderId && !tx.items && !tx.pendingIds && tx.profit == null &&
     (tx.source === "manual" || !["ขายสินค้า", "ค่าส่งสินค้าเข้า", "สั่งซื้อสินค้า (รอของมาส่ง)", "ค่าส่ง", "ค่ากลาง"].includes(tx.category));
 }
 
 async function deleteTx(id) {
   const target = transactions.find((tx) => tx.id === id);
   if (!target) return;
+  if (target.receivingLot) { showAlert("ค่าส่งนี้ผูกกับล็อตรับของและต้นทุนสินค้า ไม่สามารถลบแยกจากล็อตได้"); return; }
   if (target.shipmentId) {
     showAlert("รายการนี้เป็นค่าส่งพัสดุ แก้ไขยอดหรือใส่ 0 ที่ประวัติการส่งสินค้าในเมนูรอส่ง เพื่อให้ค่าส่งและกำไรของทุกสินค้าตรงกัน"); return;
   }
@@ -1863,7 +1829,7 @@ function renderDashboard() {
   const low = lowStockVariants();
   const open = openInstallments();
   const balance = open.reduce((s, t) => s + t.amount - (t.paidAmount || 0), 0);
-  return `<section class="dashboard-grid"><div class="panel overview-chart"><div class="section-heading"><div><p class="eyebrow">CASH FLOW</p><h2>ความเคลื่อนไหวของร้าน</h2></div><button class="text-button" data-go="report">ดูรายงาน ${icon("arrow")}</button></div><div class="chart-legend"><span><i class="legend-dot blue"></i>รายรับ</span><span><i class="legend-dot lavender"></i>รายจ่าย</span><span class="period-label">6 เดือนล่าสุด</span></div><div class="cash-chart"><div class="chart-scale"><span>${fmtMoney(max)}</span><span>${fmtMoney(max / 2)}</span><span>฿0</span></div><div class="chart-plot"><svg viewBox="0 0 500 160" preserveAspectRatio="none" role="img" aria-label="กราฟรายรับและรายจ่าย 6 เดือนล่าสุด"><defs><linearGradient id="chart-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6f80ed" stop-opacity=".3"/><stop offset="100%" stop-color="#6f80ed" stop-opacity="0"/></linearGradient></defs><path d="M0 29H500M0 87H500M0 145H500" stroke="#b7c1d4" stroke-opacity=".35" stroke-dasharray="3 5"/><polygon points="0,155 ${line} 500,155" fill="url(#chart-fill)"/><polyline points="${expenseLine}" fill="none" stroke="#b19ccc" stroke-width="2.4" stroke-dasharray="5 5" vector-effect="non-scaling-stroke"/><polyline points="${line}" fill="none" stroke="#687ce5" stroke-width="3" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>${points.map(([x, y]) => `<circle cx="${x}" cy="${y}" r="3" fill="#687ce5"/>`).join("")}</svg><div class="chart-months">${months.map((m) => `<span>${monthLabel(m).split(" ")[0]}</span>`).join("")}</div></div></div><details class="chart-data"><summary>ดูตัวเลขรายเดือน</summary><table><thead><tr><th>เดือน</th><th>รายรับ</th><th>รายจ่าย</th></tr></thead><tbody>${months.map((m, i) => `<tr><td>${monthLabel(m)}</td><td>${fmtMoney(summaries[i].income)}</td><td>${fmtMoney(summaries[i].expense)}</td></tr>`).join("")}</tbody></table></details></div><div class="panel attention-panel"><div class="section-heading"><div><p class="eyebrow">ON YOUR RADAR</p><h2>เรื่องที่ต้องดูแล</h2></div><span class="radar-orb">${icon("sparkles")}</span></div><button class="attention-row" data-go="stock" data-workspace="inventory"><span class="attention-icon amber">${icon("box")}</span><span><strong>สินค้าใกล้หมด</strong><small>เช็กสต็อกก่อนพลาดการขาย</small></span><b>${low.length}<small>ตัวเลือก</small></b>${icon("chevron")}</button><button class="attention-row" data-go="stock" data-workspace="pending"><span class="attention-icon blue">${icon("clock")}</span><span><strong>สินค้ารอรับเข้า</strong><small>ยืนยันเมื่อสินค้าเดินทางมาถึง</small></span><b>${pendingOrders.length}<small>รายการ</small></b>${icon("chevron")}</button><button class="attention-row" data-go="installment"><span class="attention-icon violet">${icon("wallet")}</span><span><strong>ยอดรอรับชำระ</strong><small>จาก ${open.length} รายการผ่อนชำระ</small></span><b>${fmtMoney(balance)}</b>${icon("chevron")}</button><button class="attention-row" data-go="preorder"><span class="attention-icon blue">${icon("bag")}</span><span><strong>Pre-order ลูกค้า</strong><small>รายการรับจองที่ยังรอส่งมอบ</small></span><b>${preorders.filter(preorderOpen).length}<small>รายการ</small></b>${icon("chevron")}</button><div class="attention-foot">${icon("check")}ข้อมูลสรุปจากรายการจริงของร้าน</div></div></section>`;
+  return `<section class="dashboard-grid"><div class="panel overview-chart"><div class="section-heading"><div><p class="eyebrow">CASH FLOW</p><h2>ความเคลื่อนไหวของร้าน</h2></div><button class="text-button" data-go="report">ดูรายงาน ${icon("arrow")}</button></div><div class="chart-legend"><span><i class="legend-dot blue"></i>รายรับ</span><span><i class="legend-dot lavender"></i>รายจ่าย</span><span class="period-label">6 เดือนล่าสุด</span></div><div class="cash-chart"><div class="chart-scale"><span>${fmtMoney(max)}</span><span>${fmtMoney(max / 2)}</span><span>฿0</span></div><div class="chart-plot"><svg viewBox="0 0 500 160" preserveAspectRatio="none" role="img" aria-label="กราฟรายรับและรายจ่าย 6 เดือนล่าสุด"><defs><linearGradient id="chart-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#6f80ed" stop-opacity=".3"/><stop offset="100%" stop-color="#6f80ed" stop-opacity="0"/></linearGradient></defs><path d="M0 29H500M0 87H500M0 145H500" stroke="#b7c1d4" stroke-opacity=".35" stroke-dasharray="3 5"/><polygon points="0,155 ${line} 500,155" fill="url(#chart-fill)"/><polyline points="${expenseLine}" fill="none" stroke="#b19ccc" stroke-width="2.4" stroke-dasharray="5 5" vector-effect="non-scaling-stroke"/><polyline points="${line}" fill="none" stroke="#687ce5" stroke-width="3" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>${points.map(([x, y]) => `<circle cx="${x}" cy="${y}" r="3" fill="#687ce5"/>`).join("")}</svg><div class="chart-months">${months.map((m) => `<span>${monthLabel(m).split(" ")[0]}</span>`).join("")}</div></div></div><details class="chart-data"><summary>ดูตัวเลขรายเดือน</summary><table><thead><tr><th>เดือน</th><th>รายรับ</th><th>รายจ่าย</th></tr></thead><tbody>${months.map((m, i) => `<tr><td>${monthLabel(m)}</td><td>${fmtMoney(summaries[i].income)}</td><td>${fmtMoney(summaries[i].expense)}</td></tr>`).join("")}</tbody></table></details></div><div class="panel attention-panel"><div class="section-heading"><div><p class="eyebrow">ON YOUR RADAR</p><h2>เรื่องที่ต้องดูแล</h2></div><span class="radar-orb">${icon("sparkles")}</span></div><button class="attention-row" data-go="stock" data-workspace="inventory"><span class="attention-icon amber">${icon("box")}</span><span><strong>สินค้าใกล้หมด</strong><small>เช็กสต็อกก่อนพลาดการขาย</small></span><b>${low.length}<small>ตัวเลือก</small></b>${icon("chevron")}</button><button class="attention-row" data-go="stock" data-workspace="pending"><span class="attention-icon blue">${icon("clock")}</span><span><strong>สินค้ารอรับเข้า</strong><small>ยืนยันเมื่อสินค้าเดินทางมาถึง</small></span><b>${pendingOrders.length + incomingPreorders().length}<small>รายการ</small></b>${icon("chevron")}</button><button class="attention-row" data-go="installment"><span class="attention-icon violet">${icon("wallet")}</span><span><strong>ยอดรอรับชำระ</strong><small>จาก ${open.length} รายการผ่อนชำระ</small></span><b>${fmtMoney(balance)}</b>${icon("chevron")}</button><button class="attention-row" data-go="preorder"><span class="attention-icon blue">${icon("bag")}</span><span><strong>Pre-order ลูกค้า</strong><small>รายการรับจองที่ยังรอส่งมอบ</small></span><b>${preorders.filter(preorderOpen).length}<small>รายการ</small></b>${icon("chevron")}</button><div class="attention-foot">${icon("check")}ข้อมูลสรุปจากรายการจริงของร้าน</div></div></section>`;
 }
 function setupStockWorkspace(content) {
   const panels = [...content.children].filter((el) =>
@@ -1876,7 +1842,7 @@ function setupStockWorkspace(content) {
   const workspaces = [
     ["inventory", "รายการสินค้า", panels[3]],
     ["add", "เพิ่ม / เติมสต็อก", panels[0]],
-    ["pending", `รอรับของ (${pendingOrders.length})`, panels[1]],
+    ["pending", `รอรับของ (${pendingOrders.length + incomingPreorders().length})`, panels[1]],
     ["shipping", "บันทึกค่าส่ง", panels[2]],
     ["count", "ตรวจนับสต็อก", countPanel],
   ];
@@ -2518,6 +2484,7 @@ function renderStockRows(groups) {
 
 function renderStockTab() {
   const incomingGroups = pendingOrderGroups();
+  const customerIncoming = incomingPreorders();
   const groups = stockColorGroups();
   const isAvailable = (group, variant) => variant.type === "new"
     ? group.variants.some(({ variant: option }) => option.type === "new" && option.qty > 0)
@@ -2670,10 +2637,10 @@ function renderStockTab() {
     </div>
 
     <div class="panel">
-      <h2>สินค้าที่สั่งซื้อแล้ว รอรับของ${incomingGroups.length > 0 ? " (" + incomingGroups.length + " กลุ่ม)" : ""}</h2>
-      <p class="hint">รายการนี้จ่ายเงินไปแล้ว (นับเป็นรายจ่ายแล้ว) แต่ยังไม่นับเป็นสต็อกที่ขายได้ จนกว่าจะกดยืนยันว่าได้รับของจริง สีและไซส์เดียวกันรวมยอดแล้ว รับบางส่วนจะตัดจากรายการที่สั่งก่อน — ติ๊กเลือกรายการที่ของมาถึงพร้อมกัน ระบุจำนวนที่ได้รับครั้งนี้ได้แม้มาไม่ครบ แล้วใส่ค่าส่งรวมครั้งเดียวได้</p>
+      <h2>สินค้าที่สั่งซื้อแล้ว รอรับของ${incomingGroups.length + customerIncoming.length > 0 ? " (" + (incomingGroups.length + customerIncoming.length) + " รายการ)" : ""}</h2>
+      <p class="hint">รวมสินค้าของร้านและพรีออเดอร์ที่ติ๊กว่าสั่งให้ลูกค้าแล้ว เลือกของที่มาถึงพร้อมกัน ระบุจำนวนรับและค่าส่งรวมครั้งเดียวได้ สินค้าของร้านจะเข้าสต็อก ส่วนพรีออเดอร์จะอัปเดตว่าของถึงแล้วให้ลูกค้าคนนั้น รับบางส่วนได้โดยรายการที่เหลือยังรอรับอยู่</p>
       ${
-        pendingOrders.length === 0
+        pendingOrders.length + customerIncoming.length === 0
           ? `<div class="empty"><div class="big">ไม่มีรายการรอรับของ</div></div>`
           : `
       <div style="display:flex; flex-direction:column; gap:8px;">
@@ -2689,21 +2656,26 @@ function renderStockTab() {
               ${po.orders.length > 1 ? `<details class="pending-order-details"><summary>รายละเอียดการสั่งซื้อ ${po.orders.length} ครั้ง</summary>${po.orders.map(order => `<p>${escapeHtml(order.orderDate)}${measurementLabel(order) ? ` · ${escapeHtml(measurementLabel(order))}` : " · ไม่ระบุอก/ยาว"} · รอรับ ${order.qty} ชิ้น · ต้นทุน/ชิ้น ${fmtMoney(order.cost)}${order.note ? ` · ${escapeHtml(order.note)}` : ""}</p>`).join("")}</details>` : ""}
             </div>
             <div class="field pending-receive-field"><label>รับครั้งนี้ (ชิ้น)</label><input class="pending-receive-qty" data-pending-id="${escapeHtml(po.id)}" type="number" min="1" max="${po.qty}" step="1" value="${po.qty}" aria-label="จำนวนรับ ${escapeHtml(po.name)}"></div>
-            <button class="btn-danger" data-cancel-pending="${po.id}">ยกเลิก</button>
+            ${pendingAllocationFields()}<button class="btn-danger" data-cancel-pending="${po.id}">ยกเลิก</button>
           </div>
         `,
           )
           .join("")}
+        ${customerIncoming.map(order => `<div class="variant-row" data-pending-preorder="${escapeHtml(order.id)}">
+          <input type="checkbox" class="pending-select" data-preorder-id="${escapeHtml(order.id)}" aria-label="เลือกรับ ${escapeHtml(order.name)} ของ ${escapeHtml(order.customer)}">
+          <div class="variant-info"><span class="tag preorder">พรีออเดอร์ลูกค้า</span><strong>${escapeHtml(order.name)} · ${escapeHtml(order.color)} ${escapeHtml(order.size)}</strong><p class="hint">ลูกค้า ${escapeHtml(order.customer)} · รับแล้ว ${order.receivedQty || 0}/${order.qty} ชิ้น · ค้างชำระ ${fmtMoney(preorderBalance(order))}</p></div>
+          <div class="field pending-receive-field"><label>รับครั้งนี้ (ชิ้น)</label><input class="pending-receive-qty" type="number" min="1" max="${order.qty - (order.receivedQty || 0)}" step="1" value="${order.qty - (order.receivedQty || 0)}"></div>${pendingAllocationFields()}
+        </div>`).join("")}
       </div>
       <div class="form-grid" style="margin-top:14px; grid-template-columns:1fr 1fr;">
         <div class="field">
-          <label>ค่าส่งรวม (สำหรับรายการที่ติ๊กเลือก)</label>
+          <label>ค่าส่งระหว่างประเทศรวม (รายการที่เลือก)</label>
           <input type="number" id="pending-bulk-ship" min="0" step="0.01" value="0">
-        </div>
+        </div><div class="field"><label>แบ่งค่าส่ง</label><select id="pending-allocation-mode"><option value="quantity">ตามจำนวนชิ้น</option><option value="weight">ตามน้ำหนักรวมที่รับ</option><option value="manual">กำหนดเอง</option></select></div>
       </div>
       <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
         <button type="button" class="btn btn-ghost btn-sm" id="pending-select-all">เลือกทั้งหมด</button>
-        <button class="btn btn-gold" id="pending-receive-selected">ยืนยันได้รับของที่เลือกแล้ว</button>
+        <p id="pending-allocation-summary" class="hint" aria-live="polite"></p><button class="btn btn-gold" id="pending-receive-selected">ยืนยันได้รับของที่เลือกแล้ว</button>
       </div>
       `
       }
@@ -2778,6 +2750,7 @@ function renderStockTab() {
 
 function wireStockTab() {
   const incomingGroups = copyData(pendingOrderGroups());
+  const customerIncoming = copyData(incomingPreorders());
   const f = document.getElementById("add-product-form");
   const newFields = document.getElementById("new-item-fields");
   const restockFields = document.getElementById("restock-fields");
@@ -3413,47 +3386,60 @@ function wireStockTab() {
         showAlert("รวมข้อมูลไม่สำเร็จ กรุณาลองอีกครั้ง");
       }
     };
+  const pendingRows = () => [...document.querySelectorAll(".pending-select:checked")].map(box => {
+    const el = box.closest(".variant-row");
+    return { box, el, qty: Number(el.querySelector(".pending-receive-qty").value), weight: Number(el.querySelector(".pending-weight").value), share: Number(el.querySelector(".pending-share").value) };
+  });
+  const updatePendingAllocation = () => {
+    const mode = document.getElementById("pending-allocation-mode")?.value || "quantity";
+    document.querySelectorAll(".pending-weight-field").forEach(el => el.hidden = mode !== "weight");
+    document.querySelectorAll(".pending-share-field").forEach(el => el.hidden = mode !== "manual");
+    document.querySelectorAll(".pending-share-preview").forEach(el => el.textContent = "");
+    const summary = document.getElementById("pending-allocation-summary");
+    if (!summary) return;
+    try {
+      const rows = pendingRows(), shares = allocateReceiving(Number(document.getElementById("pending-bulk-ship").value), mode, rows);
+      rows.forEach((row, i) => row.el.querySelector(".pending-share-preview").textContent = "ค่าส่ง " + fmtMoney(shares[i]));
+      summary.textContent = `เลือก ${rows.length} รายการ · ค่าส่งรวม ${fmtMoney(shares.reduce((sum, value) => sum + value, 0))}`;
+    } catch (error) { summary.textContent = error.message; }
+  };
+  document.querySelectorAll(".pending-select, .pending-receive-qty, .pending-weight, .pending-share, #pending-bulk-ship, #pending-allocation-mode").forEach(el => { el.addEventListener("input", updatePendingAllocation); el.addEventListener("change", updatePendingAllocation); });
   const pendingSelectAllBtn = document.getElementById("pending-select-all");
-  if (pendingSelectAllBtn) {
-    pendingSelectAllBtn.onclick = () => {
-      const boxes = document.querySelectorAll(".pending-select");
-      const allChecked = [...boxes].every((b) => b.checked);
-      boxes.forEach((b) => (b.checked = !allChecked));
-      pendingSelectAllBtn.textContent = allChecked
-        ? "เลือกทั้งหมด"
-        : "ยกเลิกที่เลือกทั้งหมด";
-    };
-  }
+  if (pendingSelectAllBtn) pendingSelectAllBtn.onclick = () => {
+    const boxes = [...document.querySelectorAll(".pending-select")], checked = boxes.every(box => box.checked);
+    boxes.forEach(box => box.checked = !checked);
+    updatePendingAllocation();
+  };
+  updatePendingAllocation();
   const pendingReceiveBtn = document.getElementById("pending-receive-selected");
-  if (pendingReceiveBtn) {
-    pendingReceiveBtn.onclick = async () => {
-      const ids = [...document.querySelectorAll(".pending-select:checked")].map(
-        (cb) => cb.dataset.pendingId,
-      );
-      if (ids.length === 0) {
-        showAlert("กรุณาติ๊กเลือกรายการที่ต้องการยืนยันว่าได้รับของแล้ว");
-        return;
-      }
-      const shipAmt = document.getElementById("pending-bulk-ship").value;
-      const quantities = {};
-      for (const id of ids) {
-        const group = incomingGroups.find(group => group.id === id);
-        if (!group || group.orders.some(order => JSON.stringify(pendingOrders.find(current => current.id === order.id)) !== JSON.stringify(order))) {
-          showAlert("รายการรอรับเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุดแล้วเลือกใหม่"); return;
+  if (pendingReceiveBtn) pendingReceiveBtn.onclick = async () => {
+    if (savingStores.size) return;
+    try {
+      const selected = pendingRows(), total = Number(document.getElementById("pending-bulk-ship").value);
+      const mode = document.getElementById("pending-allocation-mode").value;
+      const shares = allocateReceiving(total, mode, selected), rows = [];
+      selected.forEach((row, index) => {
+        const preorderId = row.box.dataset.preorderId;
+        const group = incomingGroups.find(group => group.id === row.box.dataset.pendingId);
+        const order = customerIncoming.find(order => order.id === preorderId);
+        const max = preorderId ? order?.qty - (order?.receivedQty || 0) : group?.qty;
+        if (!Number.isSafeInteger(row.qty) || row.qty < 1 || row.qty > max || !max) throw new Error("จำนวนรับต้องเป็นจำนวนเต็มตั้งแต่ 1 และไม่เกินจำนวนที่รอรับ");
+        if (preorderId) rows.push({ kind: "preorder", id: order.id, qty: row.qty, weight: 0, share: shares[index], expected: JSON.stringify(order) });
+        else {
+          let remaining = row.qty;
+          const parts = [];
+          for (const order of [...group.orders].sort((a,b) => a.orderDate.localeCompare(b.orderDate))) {
+            const qty = Math.min(remaining, order.qty);
+            if (qty > 0) parts.push({ kind: "stock", id: order.id, qty, weight: 0, expected: JSON.stringify(order) });
+            remaining -= qty;
+          }
+          const split = allocateReceiving(shares[index], "quantity", parts);
+          parts.forEach((part, i) => rows.push({ ...part, share: split[i] }));
         }
-        let remaining = Number([...document.querySelectorAll(".pending-receive-qty")].find(input => input.dataset.pendingId === id).value);
-        if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > group.qty) {
-          showAlert("จำนวนรับต้องเป็นจำนวนเต็มตั้งแต่ 1 และไม่เกินจำนวนที่รอรับ"); return;
-        }
-        for (const order of [...group.orders].sort((a, b) => a.orderDate.localeCompare(b.orderDate))) {
-          const qty = Math.min(remaining, order.qty);
-          if (qty > 0) quantities[order.id] = qty;
-          remaining -= qty;
-        }
-      }
-      await receivePendingOrdersBulk(Object.keys(quantities), shipAmt, quantities);
-    };
-  }
+      });
+      await receiveMixedLot({ name: "รับของพร้อมกัน", mode: "manual", total, rows });
+    } catch (error) { if (!error.storageReported) showAlert(error.message); }
+  };
   document.querySelectorAll("[data-cancel-pending]").forEach((btn) => {
     btn.onclick = () => deletePendingOrder(incomingGroups.find(group => group.id === btn.dataset.cancelPending).orders.map(order => order.id));
   });
@@ -4404,12 +4390,13 @@ function renderPreordersTab() {
       return `<article class="preorder-card ${late ? "preorder-late" : ""}" data-preorder="${id}">
         <div class="preorder-heading"><div><p class="eyebrow">PO · ${id}</p><h3>${escapeHtml(order.customer)}</h3><p>${escapeHtml(order.name)} · ${escapeHtml([order.color, order.size, order.type === "used" ? "มือสอง" : "มือหนึ่ง"].filter(Boolean).join(" / "))} ×${order.qty}</p></div><span class="tag ${order.status === "completed" ? "income" : order.status === "cancelled" ? "expense" : "preorder"}">${order.status === "completed" && transactions.some(tx => tx.preorderId === order.id && tx.deliveryStatus) ? "ย้ายไปจัดส่งแล้ว" : preorderStatuses[order.status]}</span></div>
         <p class="hint">${escapeHtml(order.contact || "ไม่ได้ระบุช่องทางติดต่อ")} · รับจอง ${order.createdAt} · นัดส่ง ${order.dueDate || "ยังไม่ระบุ"}${late ? " · เกินกำหนดนัดส่ง" : ""}</p>
+        ${order.receivedQty != null ? `<p class="hint">รับของแล้ว ${order.receivedQty}/${order.qty} ชิ้น · ค่าส่งจากล็อตที่ลงบัญชีแล้ว ${fmtMoney(order.internationalShippingRecorded || 0)}</p>` : ""}
         ${order.note ? `<p class="preorder-note">${escapeHtml(order.note)}</p>` : ""}
         <div class="preorder-totals"><span>ยอดสั่งซื้อ<strong>${fmtMoney(preorderTotal(order))}</strong></span><span>รับแล้ว<strong>${fmtMoney(order.paidAmount)}</strong></span><span>${order.status === "cancelled" ? "คืนเงินแล้ว" : "ค้างชำระ"}<strong>${fmtMoney(order.status === "cancelled" ? order.refundedAmount : preorderBalance(order))}</strong></span></div>
-        ${isOpen ? `<div class="preorder-actions">${order.status !== "ready" ? `<button class="btn btn-primary btn-sm" data-preorder-action="status">${order.status === "awaiting" ? "ยืนยันว่าสั่งให้ลูกค้าแล้ว" : "สินค้าถึงร้านแล้ว"}</button>` : ""}<button class="btn btn-ghost btn-sm danger-text" data-preorder-action="cancel">ยกเลิก${order.paidAmount ? "และบันทึกคืนเงิน" : "รายการ"}</button></div>
+        ${isOpen ? `<div class="preorder-actions"><label class="preorder-cost-check"><input type="checkbox" data-preorder-ordered ${order.status !== "awaiting" ? "checked" : ""} ${order.status === "ready" || order.receivedQty ? "disabled" : ""}> สั่งของให้ลูกค้าแล้ว</label>${order.status === "ordered" ? `<button type="button" class="btn btn-ghost btn-sm" data-go="stock" data-workspace="pending">ดูรายการรอรับของ</button>` : ""}<button class="btn btn-ghost btn-sm danger-text" data-preorder-action="cancel">ยกเลิก${order.paidAmount ? "และบันทึกคืนเงิน" : "รายการ"}</button></div>
         ${preorderBalance(order) > 0 ? `<form class="preorder-payment preorder-inline"><div class="field"><label>รับชำระเพิ่ม (บาท)</label><input name="amount" type="number" min="0.01" max="${preorderBalance(order)}" step="0.01" required></div><button class="btn btn-primary btn-sm" type="submit">บันทึกรับเงิน</button></form>` : '<p class="hint">ชำระครบแล้ว</p>'}
         <details><summary>แก้ไขข้อมูลการจอง</summary><form class="preorder-edit"><div class="form-grid">${preorderFields(order)}</div><p class="hint">ยอดสั่งซื้อใหม่ต้องไม่น้อยกว่ายอดที่รับเงินแล้ว</p><button class="btn btn-ghost" type="submit">บันทึกการแก้ไข</button></form></details>
-        ${order.status === "ready" ? `<details class="preorder-delivery"><summary>ของถึงแล้ว · ย้ายไปเมนูรอส่ง</summary><form class="preorder-fulfill"><p class="hint">ต้องรับเงินครบก่อนย้ายไปรอส่ง ระบบจะบันทึกยอดขายและกำไร โดยไม่รับเงินซ้ำ</p><div class="form-grid"><div class="field"><label>วิธีส่งมอบ</label><select name="source"><option value="direct">ของที่จัดหาเฉพาะลูกค้า (ไม่ผ่านสต็อก)</option><option value="stock">นำสินค้าจากสต็อกของร้าน</option></select></div><div class="field preorder-stock-field" hidden><label>สินค้าที่ตัดสต็อก</label><select name="variantId" disabled required><option value="">เลือกสินค้า สี และไซส์ให้ตรงกับรายการจอง</option>${options}</select></div><div class="field preorder-direct-field"><label>ต้นทุนจริงต่อชิ้น (บาท)</label><input name="unitCost" type="number" min="0" step="0.01" value="${order.unitCost ?? 0}" required></div><div class="field"><label>ค่าขนส่งระหว่างประเทศรวม (บาท)</label><input name="internationalShipping" type="number" min="0" step="0.01" value="${order.internationalShipping ?? 0}" required></div><div class="field"><label>ค่าส่งที่ร้านจ่าย (บาท)</label><input name="shipping" type="number" min="0" step="0.01" value="0" required></div><div class="field"><label>ค่ากลาง (บาท)</label><input name="commission" type="number" min="0" step="0.01" value="0" required></div></div><label class="preorder-cost-check preorder-direct-field"><input type="checkbox" name="costRecorded"> บันทึกรายจ่ายต้นทุนสินค้านี้ในบัญชีไปแล้ว</label><p class="hint">หากยังไม่เคยลงต้นทุน ระบบจะลงรายจ่ายวันนี้เมื่อย้ายไปรอส่ง ค่าขนส่งระหว่างประเทศ ค่าส่ง และค่ากลางจะลงเพิ่มตามจำนวนที่ระบุ</p><button type="submit" class="btn btn-primary">ยืนยันของถึงและชำระครบ · ย้ายไปรอส่ง</button></form></details>` : ""}` : ""}
+        ${order.status === "ready" ? `<details class="preorder-delivery"><summary>ของถึงแล้ว · ย้ายไปเมนูรอส่ง</summary><form class="preorder-fulfill"><p class="hint">ต้องรับเงินครบก่อนย้ายไปรอส่ง ระบบจะบันทึกยอดขายและกำไร โดยไม่รับเงินซ้ำ</p><div class="form-grid"><div class="field"><label>วิธีส่งมอบ</label><select name="source"><option value="direct">ของที่จัดหาเฉพาะลูกค้า (ไม่ผ่านสต็อก)</option><option value="stock">นำสินค้าจากสต็อกของร้าน</option></select></div><div class="field preorder-stock-field" hidden><label>สินค้าที่ตัดสต็อก</label><select name="variantId" disabled required><option value="">เลือกสินค้า สี และไซส์ให้ตรงกับรายการจอง</option>${options}</select></div><div class="field preorder-direct-field"><label>ต้นทุนจริงต่อชิ้น (บาท)</label><input name="unitCost" type="number" min="0" step="0.01" value="${order.unitCost ?? 0}" required></div><div class="field"><label>ค่าขนส่งระหว่างประเทศรวม (บาท)</label><input name="internationalShipping" type="number" min="0" step="0.01" value="${order.internationalShipping ?? 0}" required></div><div class="field"><label>ค่าส่งที่ร้านจ่าย (บาท)</label><input name="shipping" type="number" min="0" step="0.01" value="0" required></div><div class="field"><label>ค่ากลาง (บาท)</label><input name="commission" type="number" min="0" step="0.01" value="0" required></div></div><label class="preorder-cost-check preorder-direct-field"><input type="checkbox" name="costRecorded"> บันทึกรายจ่ายต้นทุนสินค้านี้ในบัญชีไปแล้ว</label><p class="hint">หากยังไม่เคยลงต้นทุน ระบบจะลงรายจ่ายวันนี้เมื่อย้ายไปรอส่ง ค่าขนส่งระหว่างประเทศจะลงเฉพาะส่วนที่ยังไม่บันทึกผ่านล็อต ค่าส่งและค่ากลางจะลงเพิ่มตามจำนวนที่ระบุ</p><button type="submit" class="btn btn-primary">ยืนยันของถึงและชำระครบ · ย้ายไปรอส่ง</button></form></details>` : ""}` : ""}
         ${cash.length ? `<details><summary>ประวัติรับเงินและค่าใช้จ่าย (${cash.length})</summary><ul class="preorder-history">${cash.map(tx => `<li><span>${escapeHtml(tx.date)} · ${escapeHtml(tx.category)}</span><strong>${tx.type === "income" ? "+" : "−"}${fmtMoney(tx.amount)}</strong></li>`).join("")}</ul></details>` : ""}
       </article>`;
     }).join("")}</div><div class="empty" id="preorder-empty" hidden><div class="big">ไม่พบรายการ pre-order</div>เพิ่มรายการใหม่ หรือลองเปลี่ยนคำค้นหาและสถานะ</div></div>`;
@@ -4471,6 +4458,13 @@ function wirePreordersTab() {
   applyFilters();
   document.querySelectorAll("[data-preorder]").forEach(card => {
     const id = card.dataset.preorder;
+    const ordered = card.querySelector("[data-preorder-ordered]");
+    if (ordered) ordered.onchange = async () => {
+      const checked = ordered.checked;
+      ordered.disabled = true;
+      await performPreorderAction(id, "ordered", { checked });
+      if (ordered.isConnected) { ordered.checked = preorders.find(order => order.id === id)?.status !== "awaiting"; ordered.disabled = false; }
+    };
     card.querySelectorAll("[data-preorder-action]").forEach(button => { button.onclick = () => performPreorderAction(id, button.dataset.preorderAction); });
     for (const [selector, action] of [[".preorder-payment", "pay"], [".preorder-edit", "edit"], [".preorder-fulfill", "fulfill"]]) {
       const actionForm = card.querySelector(selector);
@@ -4716,4 +4710,36 @@ function wireShipmentsTab() {
     }
     toast(action.type === "shippingCost" ? "แก้ไขค่าส่งและกำไรแล้ว" : action.type === "cancelSale" ? "ยกเลิกการขายและคืนสต็อกแล้ว" : action.type === "refundSale" ? "บันทึกคืนเงินแล้ว" : action.type === "ship" ? "บันทึกส่งสินค้าแล้ว" : "คืนรายการเข้ารอส่งแล้ว");
   }});
+}
+
+async function receiveMixedLot(data) {
+  if (savingStores.size) return;
+  if (typeof data.name !== "string" || data.name.length > 200) throw new Error("ชื่อล็อตยาวเกิน 200 ตัวอักษร");
+  const latest = prepareReceivingLot(storeValues(), data);
+  const lotId = uid();
+  for (const row of latest) {
+    const order = row.order;
+    if (row.kind === "preorder") {
+      order.receivedQty = (order.receivedQty || 0) + row.qty;
+      order.internationalShipping = money((order.internationalShipping || 0) + row.share);
+      order.internationalShippingRecorded = money((order.internationalShippingRecorded || 0) + row.share);
+      order.status = order.receivedQty === order.qty ? "ready" : "ordered";
+      order.updatedAt = todayStr();
+    } else {
+      addVariantCore({ ...order, name: products.find(p => p.id === order.productId)?.name || order.name, qty: row.qty, cost: order.cost + row.share / row.qty });
+      order.originalQty = order.originalQty ?? order.qty;
+      order.receivedQty = (order.receivedQty || 0) + row.qty;
+      order.qty -= row.qty;
+    }
+  }
+  pendingOrders = pendingOrders.filter(order => order.qty > 0);
+  if (data.total > 0 || latest.some(row => row.kind === "preorder")) transactions.unshift({ id: lotId, type: "expense", category: "ค่าส่งสินค้าเข้า", date: todayStr(), amount: data.total,
+    desc: "ล็อตรับของ " + (data.name || lotId),
+    receivingLot: { name: data.name, mode: data.mode, items: latest.map(({ kind, id, qty, weight, share, label }) => ({ kind, id, qty, weight, share, label })) } });
+  await saveData("products", "pendingOrders", "preorders", "transactions");
+  render();
+}
+
+function pendingAllocationFields() {
+  return `<div class="field pending-weight-field" hidden><label>น้ำหนักรวมที่รับ</label><input class="pending-weight" type="number" min="0" step="any" placeholder="ใช้หน่วยเดียวกันทุกแถว"></div><div class="field pending-share-field" hidden><label>ส่วนแบ่งค่าส่ง (บาท)</label><input class="pending-share" type="number" min="0" step="0.01" value="0"></div><span class="hint pending-share-preview"></span>`;
 }

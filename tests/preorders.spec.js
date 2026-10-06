@@ -47,10 +47,14 @@ test('customer preorders remain separate from supplier purchases throughout depo
   await page.locator('.preorder-payment [name="amount"]').fill('400');
   await page.locator('.preorder-payment button').click();
   await expectSaved(page, db => db.preorders[0].paidAmount === 500);
-  for (const status of ['ordered', 'ready']) {
-    await page.locator('[data-preorder-action="status"]').click();
-    await expectSaved(page, db => db.preorders[0].status === status);
-  }
+  await page.locator('[data-preorder-ordered]').check();
+  await expectSaved(page, db => db.preorders[0].status === 'ordered');
+  await nav(page, 'stock');
+  await page.locator('[data-workspace-tab="pending"]').click();
+  await page.locator('[data-pending-preorder] .pending-select').check();
+  await page.locator('#pending-receive-selected').click();
+  await expectSaved(page, db => db.preorders[0].status === 'ready');
+  await nav(page, 'preorder');
   await page.screenshot({ path: 'test-results/preorder-desktop.png', fullPage: true });
   await submitDelivery(page);
   await expectSaved(page, db => db.preorders[0].status === 'completed');
@@ -124,14 +128,19 @@ test('invalid deposits, edits below paid total, and incomplete payments cannot c
   await expect(page.locator('#modal-overlay')).toContainText('ยอดรับเงินต้องไม่เกิน');
   await page.locator('#modal-ok-btn').click();
   expect((await snapshot(page)).preorders[0].unitPrice).toBe(250);
-  for (const status of ['ordered', 'ready']) {
-    await page.locator('[data-preorder-action="status"]').click();
-    await expectSaved(page, db => db.preorders[0].status === status);
-  }
+  await page.locator('[data-preorder-ordered]').check();
+  await expectSaved(page, db => db.preorders[0].status === 'ordered');
+  await nav(page, 'stock');
+  await page.locator('[data-workspace-tab="pending"]').click();
+  await page.locator('[data-pending-preorder] .pending-select').check();
+  await page.locator('#pending-receive-selected').click();
+  await expectSaved(page, db => db.preorders[0].status === 'ready');
+  await nav(page, 'preorder');
   await submitDelivery(page);
   await expect(page.locator('#modal-overlay')).toContainText('ต้องรับชำระครบ');
   expect((await snapshot(page)).preorders[0].status).toBe('ready');
-  expect((await snapshot(page)).transactions).toHaveLength(1);
+  expect((await snapshot(page)).transactions.filter(tx => tx.type === 'income')).toHaveLength(1);
+  expect((await snapshot(page)).transactions.filter(tx => tx.type === 'preorder')).toHaveLength(0);
 });
 
 test('save failures keep the preorder form and retry does not duplicate the deposit', async ({ page }) => {

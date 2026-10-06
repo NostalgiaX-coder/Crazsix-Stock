@@ -2738,3 +2738,17 @@ html { background: var(--bg); }
 .profit-table-wrap { max-width: 100%; overflow-x: auto; }
 .profit-table-wrap table { min-width: 1180px; }
 .profit-table-wrap th { white-space: nowrap; }
+
+/* Keep inbound freight controls together in the existing receiving workspace. */
+#workspace-pending .pending-share-preview { white-space: nowrap; }
+#workspace-pending .pending-weight-field,
+#workspace-pending .pending-share-field { flex: 0 1 140px; min-width: 0; }
+#workspace-pending [data-pending-preorder] .variant-info > strong { display: block; margin-top: 6px; }
+#workspace-pending .pending-select { width: 18px; height: 18px; flex-shrink: 0; }
+@media (max-width: 600px) {
+  #workspace-pending [data-pending-preorder] .variant-info { grid-column: 2 / -1; }
+  #workspace-pending .pending-weight-field,
+  #workspace-pending .pending-share-field { grid-column: 2 / -1; grid-row: 3; }
+  #workspace-pending .pending-share-preview { grid-column: 2 / -1; grid-row: 4; margin: 0; }
+  #workspace-pending [data-cancel-pending] { grid-row: 5; }
+}

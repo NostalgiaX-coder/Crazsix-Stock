@@ -57,7 +57,8 @@ test('pending orders expense is recorded once and receiving adds inventory plus 
   await page.locator('#pending-receive-selected').click();
   await expectSaved(page, db => db.pendingOrders.length === 0 && db.products.length === 1);
   const received = await snapshot(page);
-  expect(received.products[0].variants[0]).toMatchObject({ qty: 3, cost: 80 });
+  expect(received.products[0].variants[0].qty).toBe(3);
+  expect(received.products[0].variants[0].cost).toBeCloseTo(80 + 40 / 3);
   expect(received.transactions.map(tx => tx.amount).sort((a, b) => a - b)).toEqual([40, 240]);
 });
 

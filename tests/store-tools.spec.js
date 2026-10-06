@@ -31,13 +31,13 @@ test('partial supplier receipts preserve the remainder and average cost without 
   let db = await snapshot(page);
   expect(db.pendingOrders[0]).toMatchObject({ originalQty: 5, receivedQty: 2 });
   expect(db.products[0].variants[0].qty).toBe(12);
-  expect(db.products[0].variants[0].cost).toBeCloseTo(1240 / 12); // (1000 + 240) / 12
+  expect(db.products[0].variants[0].cost).toBeCloseTo(1270 / 12); // Purchase cost plus allocated inbound freight.
   await page.locator('.pending-select').check();
   await page.locator('#pending-receive-selected').click();
   await expectSaved(page, db => db.pendingOrders.length === 0);
   db = await snapshot(page);
   expect(db.products[0].variants[0].qty).toBe(15);
-  expect(db.products[0].variants[0].cost).toBeCloseTo(1600 / 15);
+  expect(db.products[0].variants[0].cost).toBeCloseTo(1630 / 15);
   expect(db.transactions.map(tx => tx.amount).sort((a, b) => a - b)).toEqual([30, 600]);
 });
 

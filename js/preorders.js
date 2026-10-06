@@ -21,6 +21,8 @@ export function validatePreorder(order, validDate) {
     ["contact", "color", "size", "note"].every(key => textValid(order[key])) &&
     ["new", "used"].includes(order.type) && Object.hasOwn(preorderStatuses, order.status) &&
     Number.isSafeInteger(order.qty) && order.qty > 0 &&
+    (order.receivedQty == null || (Number.isSafeInteger(order.receivedQty) && order.receivedQty >= 0 && order.receivedQty <= order.qty)) &&
+    (order.internationalShippingRecorded == null || (amountValid(order.internationalShippingRecorded) && order.internationalShippingRecorded <= (order.internationalShipping || 0))) &&
     (order.unitCost == null || amountValid(order.unitCost)) &&
     (order.internationalShipping == null || amountValid(order.internationalShipping)) &&
     amountValid(order.unitPrice) && order.unitPrice > 0 && amountValid(preorderTotal(order)) &&
@@ -63,16 +65,24 @@ export function updatePreorder(state, id, action, data, context) {
   const order = state.preorders.find(item => item.id === id);
   check(order && preorderOpen(order), "รายการนี้ปิดแล้ว หรือไม่พบรายการ กรุณาตรวจสอบข้อมูลล่าสุด");
   if (action === "edit") {
-    Object.assign(order, preorderDetails(data, order.paidAmount, context.validDate));
+    const details = preorderDetails(data, order.paidAmount, context.validDate);
+    check(details.qty >= (order.receivedQty || 0), "จำนวนสั่งต้องไม่น้อยกว่าจำนวนที่รับแล้ว");
+    check(details.internationalShipping >= (order.internationalShippingRecorded || 0), "ค่าขนส่งต้องไม่น้อยกว่าส่วนแบ่งที่บันทึกจากล็อตแล้ว");
+    if (order.receivedQty != null) order.status = order.receivedQty === details.qty ? "ready" : "ordered";
+    Object.assign(order, details);
   } else if (action === "pay") {
     const amount = Number(data.amount);
     check(amountValid(amount) && amount > 0, "ระบุยอดรับเงินมากกว่า 0 และมีทศนิยมไม่เกิน 2 ตำแหน่ง");
     check(amount <= preorderBalance(order), "ยอดรับเงินเกินยอดค้างชำระ");
     order.paidAmount = money(order.paidAmount + amount);
     recordCash(state, order, amount, "income", "รับชำระ pre-order", context);
+  } else if (action === "ordered") {
+    check(["awaiting", "ordered"].includes(order.status) && !order.receivedQty, "รับของแล้ว ไม่สามารถเปลี่ยนการสั่งซื้อได้");
+    order.status = data.checked ? "ordered" : "awaiting";
   } else if (action === "status") {
     const next = { awaiting: "ordered", ordered: "ready" }[order.status];
     check(next, "ไม่สามารถเปลี่ยนสถานะรายการนี้ได้");
+    check(next !== "ready" || order.receivedQty == null || order.receivedQty === order.qty, "ยังรับของในล็อตไม่ครบ กรุณารับส่วนที่เหลือก่อน");
     order.status = next;
   } else if (action === "cancel") {
     if (order.paidAmount > 0) recordCash(state, order, order.paidAmount, "expense", "คืนเงิน pre-order", context);
@@ -84,7 +94,8 @@ export function updatePreorder(state, id, action, data, context) {
     const shipping = Number(data.shipping || 0), commission = Number(data.commission || 0);
     check(amountValid(shipping) && amountValid(commission), "ค่าส่งและค่ากลางต้องตั้งแต่ 0 และมีทศนิยมไม่เกิน 2 ตำแหน่ง");
     const internationalShipping = Number(data.internationalShipping ?? order.internationalShipping ?? 0);
-    check(amountValid(internationalShipping), "ค่าขนส่งระหว่างประเทศไม่ถูกต้อง");
+    check(amountValid(internationalShipping) && internationalShipping >= (order.internationalShippingRecorded || 0), "ค่าขนส่งระหว่างประเทศต้องไม่น้อยกว่าส่วนแบ่งที่ลงบัญชีจากล็อตแล้ว");
+    const shippingToRecord = money(internationalShipping - (order.internationalShippingRecorded || 0));
     let unitCost, variant;
     if (data.source === "stock") {
       variant = state.products.flatMap(product => product.variants).find(item => item.id === data.variantId);
@@ -99,7 +110,7 @@ export function updatePreorder(state, id, action, data, context) {
     // Validate everything before touching inventory or the ledger.
     if (variant) variant.qty -= order.qty;
     if (!variant && !data.costRecorded && unitCost > 0) recordCash(state, order, money(unitCost * order.qty), "expense", "ต้นทุน pre-order", context);
-    if (internationalShipping > 0) recordCash(state, order, internationalShipping, "expense", "ค่าขนส่งระหว่างประเทศ pre-order", context);
+    if (shippingToRecord > 0) recordCash(state, order, shippingToRecord, "expense", "ค่าขนส่งระหว่างประเทศ pre-order", context);
     if (shipping > 0) recordCash(state, order, shipping, "expense", "ค่าส่ง pre-order", context);
     if (commission > 0) recordCash(state, order, commission, "expense", "ค่ากลาง pre-order", context);
     state.transactions.unshift({
