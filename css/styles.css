@@ -2752,3 +2752,28 @@ html { background: var(--bg); }
   #workspace-pending .pending-share-preview { grid-column: 2 / -1; grid-row: 4; margin: 0; }
   #workspace-pending [data-cancel-pending] { grid-row: 5; }
 }
+
+/* Receiving history: everyday actions first, freight details on demand. */
+.receipt-lot { border-bottom: 1px solid var(--line); padding: 14px 0; }
+.receipt-lot > summary { cursor: pointer; font-weight: 700; }
+.receipt-lot form { padding-top: 14px; }
+.receipt-existing-row, .receipt-add-row { padding: 14px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 12px; }
+.receipt-item-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.receipt-item-heading strong { overflow-wrap: anywhere; }
+.receipt-item-heading button { flex-shrink: 0; }
+.receipt-item-fields { display: flex; align-items: center; gap: 16px; margin-top: 8px; }
+.receipt-item-fields .field { max-width: 160px; }
+.receipt-total { max-width: 240px; margin: 16px 0 10px; }
+.receipt-advanced { margin: 12px 0 16px; }
+.receipt-advanced > summary { cursor: pointer; color: var(--ink-soft); }
+.receipt-advanced[open] > .field { margin-top: 12px; }
+.receipt-legacy { margin-top: 10px; }
+@media (max-width: 600px) {
+  .receipt-item-fields { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .receipt-item-fields .field, .receipt-total { max-width: none; width: 100%; }
+  .receipt-item-heading { align-items: flex-start; }
+}
+
+.receipt-return-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--green); border-radius: 12px; padding: 12px; margin-bottom: 14px; }
+
+.receipt-lot > summary small { display: block; margin: 4px 0 0 16px; color: var(--ink-soft); font-weight: 500; }

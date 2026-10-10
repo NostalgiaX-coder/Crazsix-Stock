@@ -1,4 +1,5 @@
-import { allocateReceiving, prepareReceivingLot, validateReceivingLots } from "./receiving-lots.js";
+import { renderReceivingHistory } from "./receiving-ui.js";
+import { allocateReceiving, prepareReceivingLot, validateReceivingLots, correctReceivingLot, receivingCandidates } from "./receiving-lots.js";
 import { renderProfitTab, wireProfitTab } from "./profit-ui.js";
 import { personalUseAmount, saleProfit } from "./sale-finance.js";
 import { cancelledSaleFor, activeAccountingTransactions, deliveryLabels, pendingDeliveries, validateShipments, applyShipmentAction, validPersonalPercent } from "./shipments.js";
@@ -1082,6 +1083,7 @@ async function addPendingOrderBatch(rows, note) {
       amount: totalCost,
       date: todayStr(),
       pendingIds: created.map((po) => po.id),
+      purchaseItems: copyData(created),
     });
   }
   await saveData("pendingOrders", ...(rows.some(row => row.productId) ? ["products"] : []), ...(totalCost > 0 ? ["transactions"] : []));
@@ -1840,10 +1842,11 @@ function setupStockWorkspace(content) {
   countPanel.innerHTML = renderStocktake();
   content.append(countPanel);
   const workspaces = [
-    ["inventory", "รายการสินค้า", panels[3]],
+    ["inventory", "รายการสินค้า", panels[4]],
     ["add", "เพิ่ม / เติมสต็อก", panels[0]],
     ["pending", `รอรับของ (${pendingOrders.length + incomingPreorders().length})`, panels[1]],
-    ["shipping", "บันทึกค่าส่ง", panels[2]],
+    ["history", "รับของแล้ว", panels[2]],
+    ["shipping", "บันทึกค่าส่ง", panels[3]],
     ["count", "ตรวจนับสต็อก", countPanel],
   ];
   const nav = document.createElement("div");
@@ -1857,7 +1860,7 @@ function setupStockWorkspace(content) {
     )
     .join("");
   content.prepend(nav);
-  const inventory = panels[3];
+  const inventory = panels[4];
   if (inventory && inventory.querySelector("table")) {
     const toolbar = document.createElement("div");
     toolbar.className = "inventory-toolbar";
@@ -2021,7 +2024,7 @@ function renderHomeTab() {
       const variants = group.variants.filter(
         ({ product, variant }) =>
           matchesQuery(product, variant) &&
-          !(variant.type === "used" && variant.qty <= 0),
+          variant.qty > 0,
       );
       return { ...group, variants };
     })
@@ -2032,7 +2035,6 @@ function renderHomeTab() {
       const variants = group.variants.filter(
         ({ product, variant }) =>
           matchesQuery(product, variant) &&
-          variant.type === "used" &&
           variant.qty <= 0,
       );
       return { ...group, variants };
@@ -2453,8 +2455,8 @@ function renderStockRows(groups) {
       ).join("");
       const sizeRows = group.variants
         .map(({ variant: v }) => {
-          const pendingQty = group.pendingOrders.reduce((sum, order) =>
-            pendingSizeKey(order) === pendingSizeKey(v) ? sum + order.qty : sum, 0);
+          const pendingQty = pendingOrders.reduce((sum, order) =>
+            normalizedText(products.find(product => product.id === order.productId)?.name || order.name) === normalizedText(group.name) && pendingSizeKey(order) === pendingSizeKey(v) ? sum + order.qty : sum, 0);
           const isSoldOut = v.qty <= 0;
           return `
       <div class="stock-size-item ${isSoldOut ? "soldout-item" : ""}" data-stock-variant="${escapeHtml(v.id)}">
@@ -2486,9 +2488,7 @@ function renderStockTab() {
   const incomingGroups = pendingOrderGroups();
   const customerIncoming = incomingPreorders();
   const groups = stockColorGroups();
-  const isAvailable = (group, variant) => variant.type === "new"
-    ? group.variants.some(({ variant: option }) => option.type === "new" && option.qty > 0)
-    : variant.qty > 0;
+  const isAvailable = (group, variant) => variant.qty > 0;
   const splitGroups = (inStock) =>
     groups
       .map((group) => ({
@@ -2500,11 +2500,8 @@ function renderStockTab() {
           // Keep each order in one section, including orders for a new size.
           const matching = group.variants.find(({ product, variant }) =>
             (!order.productId || product.id === order.productId) && stockOptionKey(variant) === stockOptionKey(order));
-          const belongsToAvailable = matching
-            ? isAvailable(group, matching.variant)
-            : order.type === "new" && group.variants.some(({ variant }) => variant.type === "new")
-              ? isAvailable(group, order)
-              : group.variants.some(({ variant }) => variant.qty > 0);
+          const belongsToAvailable = matching ? matching.variant.qty > 0
+            : group.variants.some(({variant}) => variant.type === order.type && variant.qty > 0);
           return belongsToAvailable === inStock;
         }),
         variants: group.variants.filter(({ variant }) =>
@@ -2679,6 +2676,13 @@ function renderStockTab() {
       </div>
       `
       }
+    </div>
+
+    <div class="panel">
+      <h2>รับของแล้ว</h2>
+      <p class="hint">แก้จำนวนหรือค่าส่งแล้วกดบันทึก · คืนของจะย้ายกลับไปรอรับทันที</p>
+      ${renderReceivingHistory(storeValues(), {esc:escapeHtml, fmt:fmtMoney})}
+      <details><summary>แก้จำนวนคงเหลือของรายการเก่า</summary><p class="hint">รายการเก่าที่ไม่มีรายละเอียดล็อตรับของ ให้ระบุยอดคงเหลือจริงและเหตุผล ระบบเก็บประวัติปรับสต็อก การแก้ยอดคงเหลือไม่เปลี่ยนยอดเงินซื้อเดิม</p>${allVariants().map(({ product, variant }) => `<p>${escapeHtml(variantLabel(product, variant))} · คงเหลือ ${variant.qty} ชิ้น <button class="btn btn-ghost btn-sm" data-legacy-edit="${escapeHtml(variant.id)}">แก้ไขยอดคงเหลือ</button></p>`).join("")}</details>
     </div>
 
     <div class="panel">
@@ -3364,6 +3368,7 @@ function wireStockTab() {
   document.querySelectorAll("[data-edit]").forEach((btn) => {
     btn.onclick = () => openEdit(btn.dataset.edit);
   });
+  document.querySelectorAll("[data-legacy-edit]").forEach(btn => { btn.onclick = () => openEdit(btn.dataset.legacyEdit); });
   const mergeButton = document.getElementById("merge-data-btn");
   if (mergeButton)
     mergeButton.onclick = async () => {
@@ -3386,6 +3391,73 @@ function wireStockTab() {
         showAlert("รวมข้อมูลไม่สำเร็จ กรุณาลองอีกครั้ง");
       }
     };
+  document.querySelectorAll("[data-receipt-edit]").forEach(form => {
+    const mode = form.querySelector('[name="mode"]');
+    mode.onchange = () => { form.querySelector('.receipt-shares').hidden = mode.value !== "manual"; };
+    const originalTx = transactions.find(tx => tx.id === form.dataset.receiptEdit);
+    const legacyValues = () => [...form.querySelectorAll('.receipt-existing-row')].map(row => ({variantId:row.querySelector('[name="legacyVariant"]')?.value, cost:row.querySelector('[name="legacyCost"]')?.value === "" ? null : Number(row.querySelector('[name="legacyCost"]')?.value)}));
+    const commitReceipt = async data => {
+      const next = correctReceivingLot(storeValues(), data, uid, todayStr(), new Date().toISOString());
+      products = next.products; pendingOrders = next.pendingOrders; preorders = next.preorders; transactions = next.transactions;
+      await saveData("products", "pendingOrders", "preorders", "transactions");
+      render();
+    };
+    form.querySelectorAll('[name="qty"]').forEach(input => { input.oninput = () => { mode.value = "quantity"; mode.onchange(); }; });
+    form.querySelectorAll('[data-receipt-remove]').forEach(button => {
+      button.onclick = async () => {
+        if (savingStores.size) return;
+        button.disabled = true;
+        try {
+          const index = Number(button.dataset.receiptRemove), items = originalTx.receivingLot.items;
+          await commitReceipt({id:originalTx.id, expected:form.dataset.expected, quantities:items.map((item,i)=>i===index ? 0 : item.qty), legacy:legacyValues(),
+            total:originalTx.amount, mode:"quantity", shares:items.map(item=>item.share), additions:[]});
+          const notice = document.createElement("div");
+          notice.className = "receipt-return-notice"; notice.setAttribute("role", "status");
+          notice.innerHTML = `<strong>คืน ${items[index].qty} ชิ้นแล้ว</strong><button type="button" class="btn btn-ghost btn-sm">ดูของรอรับ</button>`;
+          notice.querySelector('button').onclick = () => document.querySelector('[data-workspace-tab="pending"]').click();
+          document.getElementById('workspace-history').prepend(notice);
+          toast(`คืน ${items[index].qty} ชิ้นแล้ว · อยู่ในรอรับของ`);
+        } catch(error) { if (!error.storageReported) showAlert(error.message); button.disabled = false; }
+      };
+    });
+    form.querySelector('[name="total"]').oninput = () => { mode.value = "quantity"; mode.onchange(); };
+    const lot = transactions.find(tx => tx.id === form.dataset.receiptEdit)?.receivingLot;
+    const attachable = copyData(receivingCandidates(storeValues()).filter(candidate => !lot?.items.some(item => item.kind === candidate.kind && item.id === candidate.id)));
+    form.querySelector('[data-receipt-add]').disabled = attachable.length === 0;
+    form.querySelector('[data-receipt-add]').onclick = () => {
+      const row = document.createElement("div"); row.className = "receipt-add-row";
+      row.innerHTML = `<div class="form-grid"><div class="field"><label>เลือกของที่รอรับ</label><select name="pendingKey" required><option value="">เลือกรายการรอรับของ</option>${attachable.map((candidate,index) => `<option value="${index}">${escapeHtml(candidate.label)} · รอรับ ${candidate.remaining} ชิ้น${candidate.kind === 'stock' ? ` · ต้นทุน ${fmtMoney(candidate.order.cost)}/ชิ้น` : ''}</option>`).join("")}</select></div><div class="field"><label>รับกี่ชิ้น</label><input name="addQty" type="number" min="1" step="1" value="1" required></div><div class="field"><label>ส่วนแบ่งค่าส่ง (ใช้เมื่อกำหนดเอง)</label><input name="addShare" type="number" min="0" step="0.01" value="0" required></div></div><p class="hint receipt-order-info">ต้นทุนเดิมจะใส่ให้เอง</p><button type="button" class="btn btn-ghost btn-sm" data-remove>เอาออก</button>`;
+      row.querySelector('[data-remove]').onclick = () => row.remove();
+      row.querySelector('[name="pendingKey"]').onchange = event => {
+        const candidate = event.target.value === '' ? null : attachable[Number(event.target.value)];
+        const qty = row.querySelector('[name="addQty"]');
+        if (candidate) {
+          qty.max = candidate.remaining; qty.value = candidate.remaining;
+          row.querySelector('.receipt-order-info').textContent = `${candidate.label} · รอรับ ${candidate.remaining} ชิ้น${candidate.kind === 'stock' ? ` · ต้นทุนเดิม ${fmtMoney(candidate.order.cost)}/ชิ้น` : ''}`;
+        }
+      };
+      form.querySelector('.receipt-additions').append(row);
+      mode.value = "quantity"; mode.onchange();
+    };
+    form.onsubmit = async event => {
+      event.preventDefault();
+      if (savingStores.size) return;
+      try {
+        const additions = [...form.querySelectorAll('.receipt-add-row')].map(row => {
+          const key = row.querySelector('[name="pendingKey"]').value;
+          const candidate = key === '' ? null : attachable[Number(key)];
+          if (!candidate) throw new Error("เลือกรายการรอรับที่จะแนบ");
+          return {kind:candidate.kind, id:candidate.id, expected:JSON.stringify(candidate.order), qty:Number(row.querySelector('[name="addQty"]').value), share:Number(row.querySelector('[name="addShare"]').value)};
+        });
+        await commitReceipt({id:form.dataset.receiptEdit, expected:form.dataset.expected,
+          quantities:[...form.querySelectorAll('[name="qty"]')].map(el=>Number(el.value)),
+          legacy:legacyValues(),
+          total:Number(form.querySelector('[name="total"]').value), mode:mode.value,
+          shares:[...form.querySelectorAll('[name="share"]')].map(el=>Number(el.value)).concat(additions.map(row=>row.share)), additions});
+        toast("บันทึกแล้ว");
+      } catch (error) { if (!error.storageReported) showAlert(error.message); }
+    };
+  });
   const pendingRows = () => [...document.querySelectorAll(".pending-select:checked")].map(box => {
     const el = box.closest(".variant-row");
     return { box, el, qty: Number(el.querySelector(".pending-receive-qty").value), weight: Number(el.querySelector(".pending-weight").value), share: Number(el.querySelector(".pending-share").value) };
@@ -4726,16 +4798,18 @@ async function receiveMixedLot(data) {
       order.status = order.receivedQty === order.qty ? "ready" : "ordered";
       order.updatedAt = todayStr();
     } else {
-      addVariantCore({ ...order, name: products.find(p => p.id === order.productId)?.name || order.name, qty: row.qty, cost: order.cost + row.share / row.qty });
+      const received = addVariantCore({ ...order, name: products.find(p => p.id === order.productId)?.name || order.name, qty: row.qty, cost: order.cost + row.share / row.qty });
+      row.variantId = received.variant.id;
+      row.purchase = copyData(order);
       order.originalQty = order.originalQty ?? order.qty;
       order.receivedQty = (order.receivedQty || 0) + row.qty;
       order.qty -= row.qty;
     }
   }
   pendingOrders = pendingOrders.filter(order => order.qty > 0);
-  if (data.total > 0 || latest.some(row => row.kind === "preorder")) transactions.unshift({ id: lotId, type: "expense", category: "ค่าส่งสินค้าเข้า", date: todayStr(), amount: data.total,
+  transactions.unshift({ id: lotId, type: "expense", category: "ค่าส่งสินค้าเข้า", date: todayStr(), amount: data.total,
     desc: "ล็อตรับของ " + (data.name || lotId),
-    receivingLot: { name: data.name, mode: data.mode, items: latest.map(({ kind, id, qty, weight, share, label }) => ({ kind, id, qty, weight, share, label })) } });
+    receivingLot: { name: data.name, mode: data.mode, items: latest.map(({ kind, id, qty, weight, share, label, variantId, purchase }) => ({ kind, id, qty, weight, share, label, ...(variantId ? { variantId, purchase } : {}) })) } });
   await saveData("products", "pendingOrders", "preorders", "transactions");
   render();
 }

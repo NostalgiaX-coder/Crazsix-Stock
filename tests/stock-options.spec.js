@@ -79,6 +79,8 @@ test('supplier ordering adds multiple options without creating stock before rece
   await expectSaved(page, db => db.pendingOrders.length === 2);
   expect((await snapshot(page)).products).toEqual(state.products);
   expect((await snapshot(page)).transactions[0].amount).toBe(600);
+  const originalOrders = (await snapshot(page)).pendingOrders;
+  expect((await snapshot(page)).transactions[0].purchaseItems.map(order=>order.id).sort()).toEqual(originalOrders.map(order=>order.id).sort());
   await page.evaluate(() => {
     window.__testDB.products[0].name = 'เสื้อชื่อใหม่';
     window.__testSubscribers.products(structuredClone(window.__testDB.products));
@@ -92,7 +94,8 @@ test('supplier ordering adds multiple options without creating stock before rece
   expect(db.products).toHaveLength(1);
   expect(db.products[0].name).toBe('เสื้อชื่อใหม่');
   expect(db.products[0].variants.filter(v => v.color === 'แดง').map(v => v.qty).sort()).toEqual([2, 3]);
-  expect(db.transactions).toHaveLength(1);
+  expect(db.transactions.filter(tx=>tx.category==='สั่งซื้อสินค้า (รอของมาส่ง)')).toHaveLength(1);
+  expect(db.transactions.find(tx=>tx.purchaseItems).purchaseItems.every(order=>order.cost===120 && order.price===280)).toBe(true);
   expect(errors).toEqual([]);
 });
 

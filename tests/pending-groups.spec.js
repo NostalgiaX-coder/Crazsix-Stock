@@ -25,7 +25,7 @@ test('same option becomes one receipt row and receives oldest lots with their or
   const db = await snapshot(page);
   expect(db.products[0].variants[0].qty).toBe(13);
   expect(db.products[0].variants[0].cost).toBeCloseTo((1000 + 160 + 120) / 13);
-  expect(db.transactions[0].amount).toBe(610);
+  expect(db.transactions.find(tx => tx.id === 'purchase').amount).toBe(610);
   expect(db.pendingOrders.find(order => order.id === 'older')).toBeUndefined();
   await expect(row).toContainText('x2');
   expect(errors).toEqual([]);
