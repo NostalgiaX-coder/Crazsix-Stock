@@ -1,5 +1,5 @@
 import { money } from './preorders.js';
-import { allocateCashCosts, stockOptionKey, stockAdjustment, measurementsOf, measurementLabel } from './inventory-tools.js';
+import { matchingStockOption, allocateCashCosts, stockOptionKey, stockAdjustment, measurementsOf, measurementLabel } from './inventory-tools.js';
 
 const check = (ok, message) => { if (!ok) throw new Error(message); };
 const cash = value => Number.isFinite(value) && value >= 0 && value <= 1e12 && Math.abs(value - money(value)) < 1e-7;
@@ -134,7 +134,7 @@ export function correctReceivingLot(state, data, newId, date, at) {
       let product = order.productId ? next.products.find(p => p.id === order.productId) : next.products.find(p => normalize(p.name) === normalize(order.name));
       check(product || !order.productId, 'ไม่พบสินค้าเดิมของรายการรอรับ');
       if (!product) { product = {id:newId(), name:order.name, image:order.image || null, colorImages:{}, createdAt:date, variants:[]}; next.products.unshift(product); }
-      let variant = product.variants.find(v => stockOptionKey(v) === stockOptionKey(order));
+      let variant = matchingStockOption(next.products.filter(p => normalize(p.name) === normalize(product.name)).flatMap(p => p.variants), order);
       if (!variant) { variant = {id:newId(), color:order.color || '', size:order.size || '', type:order.type, ...measurementsOf(order), qty:0, cost:order.cost, price:order.price, createdAt:date}; product.variants.push(variant); }
       item.variantId = variant.id; item.purchase = JSON.parse(JSON.stringify(order));
     }

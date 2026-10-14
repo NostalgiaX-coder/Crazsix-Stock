@@ -293,7 +293,9 @@ test('new lots return their exact purchase data and reattach it without entering
   await expectSaved(page,db=>db.pendingOrders.length===0);
   db=await snapshot(page);
   expect(db.transactions.find(tx=>tx.id==='purchase')).toEqual(state.transactions[0]);
-  expect(db.products[0].variants.find(v=>v.chestInches===24)).toMatchObject({qty:4,cost:120});
+  expect(db.products[0].variants.find(v=>v.chestInches===24)).toMatchObject({qty:14});
+  expect(db.products[0].variants.find(v=>v.chestInches===24).cost).toBeCloseTo((10 * 100 + 4 * 120) / 14);
+  expect(db.products[0].variants.some(v=>v.id==='variant-1')).toBe(false);
   expect(db.transactions.find(tx=>tx.receivingLot).receivingLot.items[0].purchase.cost).toBe(100);
   expect(errors).toEqual([]);
 });
@@ -389,7 +391,8 @@ test('legacy lots recover exact costs from purchase totals and remaining orders 
   let db=await snapshot(page), items=db.transactions.find(t=>t.id==='old-lot').receivingLot.items;
   expect(items.map(i=>i.purchase.cost)).toEqual([317.91,325.5777777777778,321.8775]);
   expect(items[2]).toMatchObject({variantId:'l-measured',purchase:{cost:321.8775,chestInches:46,lengthInches:26}});
-  expect(db.products).toEqual(state.products);
+  expect(db.products[0].variants).toHaveLength(2);
+  expect(db.products[0].variants.find(v=>v.id==='l-measured')).toMatchObject({qty:4,cost:350,stockAliases:['l-plain']});
   await page.addInitScript(saved => { window.__testDB = saved; }, await snapshot(page));
   await page.reload(); await openHistory(page);
   await page.locator('[data-receipt-remove]').nth(2).click();

@@ -1298,23 +1298,6 @@ tbody tr:hover {
   border-bottom: 1px solid var(--line);
   font-size: 10px;
 }
-.stock-source-details {
-  grid-column: 3 / -1;
-  min-width: 0;
-}
-.stock-source-details summary {
-  cursor: pointer;
-}
-.stock-source-details[open] {
-  grid-column: 1 / -1;
-}
-.stock-source-details > div {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  padding-top: 6px;
-}
 .stock-size-item:last-child {
   border: 0;
 }

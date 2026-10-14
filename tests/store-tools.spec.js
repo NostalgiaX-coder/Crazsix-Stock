@@ -38,7 +38,9 @@ test('partial supplier receipts preserve the remainder and average cost without 
   db = await snapshot(page);
   expect(db.products[0].variants[0].qty).toBe(15);
   expect(db.products[0].variants[0].cost).toBeCloseTo(1630 / 15);
-  expect(db.transactions.map(tx => tx.amount).sort((a, b) => a - b)).toEqual([30, 600]);
+  expect(db.transactions.map(tx => tx.amount).sort((a, b) => a - b)).toEqual([0, 30, 600]);
+  expect(db.transactions.filter(tx => tx.id === 'purchase')).toHaveLength(1);
+  expect(db.transactions.filter(tx => tx.receivingLot).flatMap(tx => tx.receivingLot.items).reduce((sum, item) => sum + item.qty, 0)).toBe(5);
 });
 
 test('invalid receipt quantities and failed writes preserve supplier and inventory data', async ({ page }) => {

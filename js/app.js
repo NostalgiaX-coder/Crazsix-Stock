@@ -6,7 +6,7 @@ import { cancelledSaleFor, activeAccountingTransactions, deliveryLabels, pending
 import { renderShipments, wireShipments, renderShipmentAllocation } from "./shipments-ui.js";
 import { reconcileAutomaticAds, campaignProductIds, campaignHasProduct, campaignUntilBudget, productAdMetrics, validateAdsBackup, validateAdWallet, applyAdAction, isAdSpend } from "./ads.js";
 import { renderAds, wireAds } from "./ads-ui.js";
-import { parseMeasurement, measurementsOf, validMeasurements, measurementLabel, stockOptionKey, assertStockRows, assertShipping, stockAdjustment, validAdjustments, allocateCashCosts } from "./inventory-tools.js";
+import { combineUnmeasuredStock, matchingStockOption, parseMeasurement, measurementsOf, validMeasurements, measurementLabel, stockOptionKey, assertStockRows, assertShipping, stockAdjustment, validAdjustments, allocateCashCosts } from "./inventory-tools.js";
 import { toCsv, cashSummary, followUpItems } from "./store-tools.js";
 import { stockDatabase, firebaseConfigured } from "./firebase-service.js";
 import { money, preorderStatuses, preorderTotal, preorderOpen, preorderBalance, validatePreorder, createPreorder, updatePreorder } from "./preorders.js";
@@ -185,6 +185,17 @@ let realtimeRenderPending = false;
 let realtimeRenderTimer = null;
 const copyData = (value) => JSON.parse(JSON.stringify(value));
 const storeValues = () => ({ products, transactions, pendingOrders, preorders, adCampaigns, adWallet, shipments });
+let normalizedStores = new Set();
+function normalizeStockData() {
+  const before = storeValues();
+  const next = combineUnmeasuredStock(before);
+  for (const name of STORE_NAMES) {
+    if (JSON.stringify(before[name]) !== JSON.stringify(next[name])) {
+      assignStore(name, next[name]);
+      normalizedStores.add(name);
+    }
+  }
+}
 function assignStore(name, value) {
   const list = Array.isArray(value) ? value : [];
   if (name === "products") products = list;
@@ -302,6 +313,8 @@ async function loadStoreData() {
     );
     names.forEach((name, index) => assignStore(name, values[index]));
     confirmedStore = copyData(storeValues());
+    normalizedStores.clear();
+    normalizeStockData();
 
     loaded = true;
     await syncAutomaticAds(false);
@@ -326,6 +339,7 @@ function subscribeToStoreChanges() {
             return;
           assignStore(name, list);
           confirmedStore[name] = copyData(list);
+          normalizeStockData();
           requestRealtimeRender();
         },
         (error) => {
@@ -339,6 +353,8 @@ function subscribeToStoreChanges() {
 }
 
 async function saveData(...names) {
+  normalizeStockData();
+  names = [...new Set([...names, ...normalizedStores])];
   const values = storeValues();
   const payload = Object.fromEntries(
     names.map((name) => [name, copyData(values[name])]),
@@ -353,6 +369,7 @@ async function saveData(...names) {
     await stockDatabase.setMany(payload, expected);
     names.forEach((name) => {
       confirmedStore[name] = copyData(payload[name]);
+      normalizedStores.delete(name);
     });
     if (typeof toast === "function") toast("บันทึกข้อมูลเรียบร้อยแล้ว");
   } catch (error) {
@@ -370,6 +387,7 @@ async function saveData(...names) {
       });
       requestRealtimeRender();
     }
+    normalizeStockData();
     console.error("save failed", error);
     error.storageReported = true;
     showAlert(
@@ -437,7 +455,8 @@ function validInventoryRow(row) {
     row.cost >= 0 &&
     Number.isFinite(row.price) &&
     row.price >= 0 &&
-    validMeasurements(row) && validAdjustments(row.adjustments)
+    validMeasurements(row) && validAdjustments(row.adjustments) &&
+    (row.stockAliases == null || (Array.isArray(row.stockAliases) && row.stockAliases.every(id => typeof id === "string" && id && id !== row.id)))
   );
 }
 function validateBackup(data) {
@@ -492,7 +511,9 @@ function validateBackup(data) {
   const validPreorders = Array.isArray(importedPreorders) && importedPreorders.every(row => validatePreorder(row, validDateString));
   if (!validProducts || !validTransactions || !validPending || !validPreorders || !validateReceivingLots(data.transactions, importedPreorders))
     throw new Error("พบรายการสินค้า จำนวนเงิน หรือวันที่ไม่ถูกต้องในไฟล์สำรอง");
-  const groups = [importedProducts, importedProducts.flatMap(product => product.variants), data.transactions, importedPending, importedPreorders];
+  const stockIdentities = importedProducts.flatMap(product => product.variants).flatMap(variant =>
+    [{ id: variant.id }, ...(variant.stockAliases || []).map(id => ({ id }))]);
+  const groups = [importedProducts, stockIdentities, data.transactions, importedPending, importedPreorders];
   if (!groups.every(uniqueIds)) throw new Error("พบรหัสรายการซ้ำ ว่าง หรือมีอักขระที่ไม่รองรับในไฟล์สำรอง");
   const productIds = new Set(importedProducts.map(product => product.id));
   if (importedPending.some(order => order.productId != null && !productIds.has(order.productId))) throw new Error("รายการรอรับอ้างถึงสินค้าที่ไม่มีในไฟล์สำรอง");
@@ -586,30 +607,6 @@ function stockColorGroups() {
   });
   return [...groups.values()];
 }
-// Combine unmeasured new stock only when the size has one known measurement pair.
-// Keep source IDs for editing and exporting; this is a stock-view aggregation.
-function stockDisplayGroups() {
-  return stockColorGroups().map(group => {
-    const entries = group.variants.map(entry => ({ ...entry, variant: { ...entry.variant }, members: [entry] }));
-    const absorbed = new Set();
-    for (const entry of entries) {
-      const v = entry.variant;
-      if (v.type !== "new" || v.chestInches != null || v.lengthInches != null) continue;
-      const candidates = entries.filter(other => other.variant.type === "new" &&
-        normalizedText(other.variant.size) === normalizedText(v.size) &&
-        other.variant.chestInches != null && other.variant.lengthInches != null);
-      if (!candidates.length || new Set(candidates.map(other => stockOptionKey(other.variant))).size !== 1) continue;
-      const target = candidates[0];
-      const totalQty = target.variant.qty + v.qty;
-      const totalValue = target.variant.qty * target.variant.cost + v.qty * v.cost;
-      target.variant.cost = totalQty > 0 ? totalValue / totalQty : target.variant.cost;
-      target.variant.qty = totalQty;
-      target.members.push(...entry.members);
-      absorbed.add(entry);
-    }
-    return { ...group, variants: entries.filter(entry => !absorbed.has(entry)) };
-  });
-}
 function saleProductGroups() {
   const groups = new Map();
   allVariants()
@@ -650,7 +647,7 @@ function compareSizes(a, b) {
 }
 function findVariant(variantId) {
   for (const prod of products) {
-    const v = prod.variants.find((x) => x.id === variantId);
+    const v = prod.variants.find((x) => x.id === variantId || x.stockAliases?.includes(variantId));
     if (v) return { product: prod, variant: v };
   }
   return null;
@@ -770,8 +767,10 @@ function addVariantCore(data) {
   const type = data.type;
 
   if (prod) {
-    // Actual measurements distinguish items even when their tag size matches.
-    const existing = prod.variants.find(v => stockOptionKey(v) === stockOptionKey(data));
+    // New stock with unknown measurements uses the unique known size.
+    const sameProducts = products.filter(p => normalizedText(p.name) === normalizedText(prod.name));
+    const existing = matchingStockOption(sameProducts.flatMap(p => p.variants), data);
+    if (existing) prod = sameProducts.find(p => p.variants.includes(existing));
     if (existing) {
       // เจอตัวเลือกเดิม -> บวกจำนวนเข้าไป และเฉลี่ยต้นทุนถ่วงน้ำหนัก
       const totalOldValue = existing.qty * existing.cost;
@@ -991,6 +990,7 @@ async function mergeDuplicateData() {
           ? (oldValue + addValue) / totalQty
           : Math.max(Number(targetVariant.cost) || 0, Number(source.cost) || 0);
       targetVariant.qty = totalQty;
+      targetVariant.stockAliases = [...new Set([...(targetVariant.stockAliases || []), source.id, ...(source.stockAliases || [])])];
       if (source.adjustments?.length) targetVariant.adjustments = [...(targetVariant.adjustments || []), ...source.adjustments].sort((a, b) => a.date.localeCompare(b.date));
       if (source.price != null) targetVariant.price = Number(source.price) || 0;
       idMap.set(source.id, targetVariant.id);
@@ -1157,10 +1157,15 @@ async function restockVariants(rows, data) {
   });
   assertStockRows(prepared);
   for (const row of prepared) {
-    const current = products.find(p => p.id === row.productId)?.variants.find(v => stockOptionKey(v) === stockOptionKey(row));
+    const product = products.find(p => p.id === row.productId);
+    const current = matchingStockOption(products.filter(p => normalizedText(p.name) === normalizedText(product.name)).flatMap(p => p.variants), row);
     if (current && !Number.isSafeInteger(current.qty + row.qty)) throw new Error("จำนวนรวมมากเกินกว่าระบบรองรับ");
   }
-  const keys = prepared.map(row => JSON.stringify([row.productId, stockOptionKey(row)]));
+  const keys = prepared.map(row => {
+    const product = products.find(p => p.id === row.productId);
+    const variants = products.filter(p => normalizedText(p.name) === normalizedText(product.name)).flatMap(p => p.variants);
+    return JSON.stringify([normalizedText(product.name), stockOptionKey(matchingStockOption(variants, row) || row)]);
+  });
   if (new Set(keys).size !== keys.length) throw new Error("เลือกสินค้า สี ไซส์ และสภาพซ้ำ กรุณารวมจำนวนไว้ในแถวเดียว");
   assertShipping(Number(data.shippingIn || 0));
   const updated = [];
@@ -1905,7 +1910,7 @@ function setupStockWorkspace(content) {
       inventoryStatus = controls.querySelector("#stock-status").value;
       inventoryCondition = controls.querySelector("#stock-condition").value;
       inventorySort = controls.querySelector("#stock-sort").value;
-      const lookup = new Map(stockDisplayGroups().flatMap(group => group.variants).map(item => [item.variant.id, item]));
+      const lookup = new Map(stockColorGroups().flatMap(group => group.variants).map(item => [item.variant.id, item]));
       let count = 0, qty = 0, value = 0;
       inventory.querySelectorAll("tbody tr").forEach(row => {
         const visible = [];
@@ -1947,8 +1952,7 @@ function setupStockWorkspace(content) {
       filter();
     };
     controls.querySelector("#stock-export-filtered").onclick = () => {
-      const displayed = new Map(stockDisplayGroups().flatMap(group => group.variants).map(item => [item.variant.id, item]));
-      const ids = new Set([...inventory.querySelectorAll('[data-stock-variant]:not([hidden])')].flatMap(item => displayed.get(item.dataset.stockVariant)?.members.map(({variant}) => variant.id) || []));
+      const ids = new Set([...inventory.querySelectorAll('[data-stock-variant]:not([hidden])')].map(item => item.dataset.stockVariant));
       downloadCsv("filtered-stock", [["รหัส", "สินค้า", "สี", "ไซส์", "อก (นิ้ว)", "ความยาว (นิ้ว)", "สภาพ", "จำนวน", "ต้นทุนต่อชิ้น", "ราคาขาย", "มูลค่า"], ...allVariants().filter(({variant}) => ids.has(variant.id)).map(({product, variant:v}) => [v.id, product.name, v.color, v.size, v.chestInches ?? "", v.lengthInches ?? "", v.type, v.qty, v.cost, v.price, money(v.qty * v.cost)])]);
     };
     search.oninput = filter;
@@ -2479,7 +2483,7 @@ function renderStockRows(groups) {
         `<div class="stock-pending-option">สี ${escapeHtml(order.color || "-")} · ไซส์ ${escapeHtml(order.size || "-")} · ${order.type === "new" ? "มือ1" : "มือ2"}${measurementLabel(order) ? ` · ${escapeHtml(measurementLabel(order))}` : ""}<strong>รอรับ ${order.qty} ชิ้น</strong></div>`
       ).join("");
       const sizeRows = group.variants
-        .map(({ variant: v, members }) => {
+        .map(({ variant: v }) => {
           const pendingQty = pendingOrders.reduce((sum, order) =>
             normalizedText(products.find(product => product.id === order.productId)?.name || order.name) === normalizedText(group.name) && pendingSizeKey(order) === pendingSizeKey(v) ? sum + order.qty : sum, 0);
           const isSoldOut = v.qty <= 0;
@@ -2487,7 +2491,8 @@ function renderStockRows(groups) {
       <div class="stock-size-item ${isSoldOut ? "soldout-item" : ""}" data-stock-variant="${escapeHtml(v.id)}">
         <span>ไซส์ ${escapeHtml(v.size || "-")} · ${v.type === "new" ? "มือ1" : "มือ2"} · ${isSoldOut ? "สินค้าหมด" : "คงเหลือ " + v.qty + " ชิ้น"}<span class="stock-size-pending">รอรับ ${pendingQty} ชิ้น</span>${renderMeasurementDetails(v)}</span>
         <span>${fmtMoney(v.cost)}</span>
-        ${members?.length > 1 ? `<details class="stock-source-details"><summary>จัดการรายการ (${members.length})</summary>${members.map(({variant: source}) => `<div>${escapeHtml(measurementLabel(source) || "ไม่ระบุอก/ยาว")} · ${source.qty} ชิ้น <button class="btn btn-ghost btn-sm" data-edit="${source.id}">แก้ไข</button><button class="btn-danger" data-del="${source.id}">ลบ</button></div>`).join("")}</details>` : `<button class="btn btn-ghost btn-sm" data-edit="${v.id}">แก้ไข</button><button class="btn-danger" data-del="${v.id}">ลบ</button>`}
+        <button class="btn btn-ghost btn-sm" data-edit="${v.id}">แก้ไข</button>
+        <button class="btn-danger" data-del="${v.id}">ลบ</button>
       </div>`;
         })
         .join("");
@@ -2511,7 +2516,7 @@ function renderStockRows(groups) {
 function renderStockTab() {
   const incomingGroups = pendingOrderGroups();
   const customerIncoming = incomingPreorders();
-  const groups = stockDisplayGroups();
+  const groups = stockColorGroups();
   const isAvailable = (group, variant) => variant.qty > 0;
   const splitGroups = (inStock) =>
     groups
@@ -2522,8 +2527,8 @@ function renderStockTab() {
           if (normalizedText(productName) !== normalizedText(group.name) ||
               normalizedText(order.color) !== normalizedText(group.variants[0].variant.color)) return false;
           // Keep each order in one section, including orders for a new size.
-          const matching = group.variants.find(({ members }) => members.some(({ product, variant }) =>
-            (!order.productId || product.id === order.productId) && stockOptionKey(variant) === stockOptionKey(order)));
+          const matchedVariant = matchingStockOption(group.variants.map(({variant}) => variant), order);
+          const matching = group.variants.find(({variant}) => variant === matchedVariant);
           const belongsToAvailable = matching ? matching.variant.qty > 0
             : group.variants.some(({variant}) => variant.type === order.type && variant.qty > 0);
           return belongsToAvailable === inStock;

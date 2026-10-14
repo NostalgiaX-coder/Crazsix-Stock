@@ -9,6 +9,57 @@ export function stockOptionKey(row) {
   const normalize = value => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
   return JSON.stringify([normalize(row.color), normalize(row.size), row.type, row.chestInches ?? null, row.lengthInches ?? null]);
 }
+const normalizeStockText = value => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+const stockTagKey = row => stockOptionKey({ ...row, chestInches: null, lengthInches: null });
+
+// An unknown measurement can use a known new-stock option only when it is unambiguous.
+export function matchingStockOption(variants, row) {
+  const exact = variants.find(v => stockOptionKey(v) === stockOptionKey(row));
+  if (exact) return exact;
+  if (row.type !== 'new' || row.chestInches != null || row.lengthInches != null) return null;
+  const candidates = variants.filter(v => v.type === 'new' && stockTagKey(v) === stockTagKey(row) &&
+    v.chestInches != null && v.lengthInches != null);
+  return candidates.length && new Set(candidates.map(stockOptionKey)).size === 1 ? candidates[0] : null;
+}
+
+// Normalize a copy so all screens and mutations use one real stock balance.
+// Aliases let old sales and receipt references resolve after a later realtime update.
+export function combineUnmeasuredStock(state) {
+  const next = JSON.parse(JSON.stringify(state));
+  const groups = new Map();
+  for (const product of next.products) {
+    for (const variant of product.variants) {
+      if (variant.type !== 'new') continue;
+      const key = JSON.stringify([normalizeStockText(product.name), stockTagKey(variant)]);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ product, variant });
+    }
+  }
+  for (const entries of groups.values()) {
+    const known = entries.filter(({variant:v}) => v.chestInches != null && v.lengthInches != null);
+    if (!known.length || new Set(known.map(({variant}) => stockOptionKey(variant))).size !== 1) continue;
+    const target = known[0].variant;
+    for (const {product, variant:source} of entries) {
+      if (source.chestInches != null || source.lengthInches != null) continue;
+      const qty = target.qty + source.qty;
+      if (!Number.isSafeInteger(qty) || qty < 0) continue;
+      target.cost = qty > 0 ? (target.qty * target.cost + source.qty * source.cost) / qty : target.cost;
+      target.qty = qty;
+      target.stockAliases = [...new Set([...(target.stockAliases || []), source.id, ...(source.stockAliases || [])])];
+      if (source.adjustments?.length) target.adjustments = [...(target.adjustments || []), ...source.adjustments].sort((a,b) => a.date.localeCompare(b.date));
+      product.variants = product.variants.filter(v => v !== source);
+    }
+  }
+  const aliases = new Map(next.products.flatMap(p => p.variants).flatMap(v => (v.stockAliases || []).map(id => [id, v.id])));
+  const canonical = id => aliases.get(id) || id;
+  for (const tx of next.transactions || []) {
+    if (tx.productId != null) tx.productId = canonical(tx.productId);
+    for (const item of tx.items || []) if (item.productId != null) item.productId = canonical(item.productId);
+    for (const item of tx.receivingLot?.items || []) if (item.variantId) item.variantId = canonical(item.variantId);
+  }
+  for (const order of next.preorders || []) if (order.fulfillment?.variantId) order.fulfillment.variantId = canonical(order.fulfillment.variantId);
+  return next;
+}
 export function assertStockRows(rows, existing = null) {
   if (!Array.isArray(rows) || !rows.length) throw new Error('กรุณาระบุรายการสินค้าอย่างน้อย 1 รายการ');
   const ids = new Set();

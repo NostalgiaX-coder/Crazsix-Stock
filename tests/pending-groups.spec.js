@@ -84,7 +84,7 @@ test('F1 Jacket Black L combines 4 measured and 2 unmeasured pending units while
   await page.locator('#pending-receive-selected').click();
   await expectSaved(page, db => db.pendingOrders.length === 1 && db.pendingOrders[0].qty === 1);
   const db = await snapshot(page);
-  expect(db.products[0].variants.find(v => v.id === 'measured-stock').qty).toBe(5);
-  expect(db.products[0].variants.find(v => v.id === 'plain-stock').qty).toBe(1);
+  expect(db.products[0].variants.find(v => v.id === 'measured-stock').qty).toBe(6);
+  expect(db.products[0].variants.find(v => v.id === 'plain-stock')).toBeUndefined();
   expect(errors).toEqual([]);
 });
