@@ -72,7 +72,7 @@ test('F1 Jacket Black L combines 4 measured and 2 unmeasured pending units while
   ];
   const errors = await boot(page, s); await nav(page, 'stock');
   await expect(page.locator('[data-stock-variant="measured-stock"] .stock-size-pending')).toHaveText('รอรับ 6 ชิ้น');
-  await expect(page.locator('[data-stock-variant="plain-stock"] .stock-size-pending')).toHaveText('รอรับ 6 ชิ้น');
+  await expect(page.locator('[data-stock-variant="plain-stock"]')).toHaveCount(0);
   await expect(page.locator('.stock-pending-option')).toHaveCount(2);
   await expect(page.locator('.stock-pending-option').filter({ hasText: 'อก 24' })).toContainText('รอรับ 4 ชิ้น');
   await expect(page.locator('.stock-pending-option').filter({ hasNotText: 'อก 24' })).toContainText('รอรับ 2 ชิ้น');
