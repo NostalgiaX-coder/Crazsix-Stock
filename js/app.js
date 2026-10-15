@@ -1,3 +1,4 @@
+import { recordStockBatch, correctStockBatch, renderStockHistory, validStockHistory } from "./stock-history.js";
 import { renderReceivingHistory } from "./receiving-ui.js";
 import { allocateReceiving, prepareReceivingLot, validateReceivingLots, correctReceivingLot, receivingCandidates } from "./receiving-lots.js";
 import { renderProfitTab, wireProfitTab } from "./profit-ui.js";
@@ -483,7 +484,7 @@ function validateBackup(data) {
       typeof product.name === "string" &&
       product.name.trim() &&
       Array.isArray(product.variants) &&
-      product.variants.every(validInventoryRow),
+      product.variants.every(validInventoryRow) && validStockHistory(product.stockHistory),
   );
   const validTransactions = data.transactions.every(
     (tx) =>
@@ -825,6 +826,7 @@ function addVariantCore(data) {
 }
 
 async function addProductOrVariant(data) {
+  const previousTxIds = new Set(transactions.map(tx => tx.id));
   assertStockRows([data]);
   assertShipping(Number(data.shippingIn || 0));
   const { prod, variant } = addVariantCore(data);
@@ -854,12 +856,14 @@ async function addProductOrVariant(data) {
     });
     txAdded = true;
   }
+  recordStockBatch(storeValues(), [{variant, label:variantLabel(prod,variant), qty:data.qty, cost:data.cost}], data, "new", previousTxIds, uid(), todayStr());
   await saveData("products", ...(txAdded ? ["transactions"] : []));
   render();
 }
 
 // rows: [{name,color,size,type,price,cost,qty,image}]; base: {logExpense, shippingIn}
 async function addProductBatch(base, rows) {
+  const previousTxIds = new Set(transactions.map(tx => tx.id));
   assertStockRows(rows);
   assertShipping(Number(base.shippingIn || 0));
   const created = rows.map((r) => ({
@@ -911,6 +915,7 @@ async function addProductBatch(base, rows) {
     });
     txAdded = true;
   }
+  recordStockBatch(storeValues(), created.map(item => ({variant:item.variant,label:variantLabel(item.prod,item.variant),qty:item.addedQty,cost:item.batchCost})), base, "new", previousTxIds, uid(), todayStr());
   await saveData("products", ...(txAdded ? ["transactions"] : []));
   render();
 }
@@ -968,6 +973,7 @@ async function mergeDuplicateData() {
       });
     const target = mergedProducts.get(productKey);
     productIdMap.set(product.id, target.id);
+    if (target !== product && product.stockHistory?.length) target.stockHistory = [...(target.stockHistory || []), ...product.stockHistory];
     if (!target.image && product.image) target.image = product.image;
     Object.assign(target.colorImages, product.colorImages || {});
     product.variants.forEach((source) => {
@@ -1144,6 +1150,7 @@ async function deletePendingOrder(pendingIds) {
 
 // เติมหลายตัวในล็อตเดียว โดยคิดต้นทุนเฉลี่ยถ่วงน้ำหนักให้แต่ละตัวเลือก
 async function restockVariants(rows, data) {
+  const previousTxIds = new Set(transactions.map(tx => tx.id));
   const prepared = rows.map(row => {
     if (!row.newOption) {
       const found = findVariant(row.variantId);
@@ -1212,6 +1219,7 @@ async function restockVariants(rows, data) {
     });
     txAdded = true;
   }
+  recordStockBatch(storeValues(), updated.map(item => ({variant:item.variant,label:variantLabel(item.product,item.variant),qty:item.qty,cost:item.batchCost})), data, "restock", previousTxIds, uid(), todayStr());
   await saveData("products", ...(txAdded ? ["transactions"] : []));
   render();
 }
@@ -1276,7 +1284,7 @@ async function deleteVariant(variantId) {
   const { product } = found;
   if (product.variants.length === 1 && (adCampaigns.some(c => campaignHasProduct(c, product.id)) || pendingOrders.some(o => o.productId === product.id))) { showAlert("สินค้ามีรายการที่ผูกเพิ่มระหว่างยืนยัน กรุณาตรวจสอบข้อมูลล่าสุด"); return; }
   product.variants = product.variants.filter((v) => v.id !== variantId);
-  if (product.variants.length === 0) {
+  if (product.variants.length === 0 && !product.stockHistory?.length) {
     products = products.filter((p) => p.id !== product.id);
   }
   await saveData("products", "pendingOrders", "adCampaigns");
@@ -2536,7 +2544,7 @@ function renderStockTab() {
           return belongsToAvailable === inStock;
         }),
         variants: group.variants.filter(({ variant }) =>
-          inStock ? variant.qty > 0
+          inStock ? variant.qty > 0 || (variant.type === "new" && hasAvailableNewSize(group))
             : variant.qty <= 0 && (variant.type !== "new" || !hasAvailableNewSize(group)),
         ),
       }))
@@ -2663,6 +2671,7 @@ function renderStockTab() {
 
         <div style="margin-top:12px;"><button type="submit" class="btn btn-primary" id="add-product-submit">เพิ่มสินค้า</button></div>
       </form>
+      ${renderStockHistory(storeValues(), {esc:escapeHtml, fmt:fmtMoney})}
     </div>
 
     <div class="panel">
@@ -2777,7 +2786,7 @@ function renderStockTab() {
           <div class="big">ยังไม่มีสินค้าในสต็อก</div>
           เพิ่มสินค้าชิ้นแรกจากฟอร์มด้านบน
         </div>`
-          : `${availableGroups.length ? stockSection("available", "สินค้าพร้อมขาย", availableGroups) : ""}
+          : `${availableGroups.length ? stockSection("available", "สินค้าในสต็อก", availableGroups) : ""}
              ${soldOutGroups.length ? stockSection("soldout", "สินค้าหมด", soldOutGroups) : ""}`
       }
     </div>
@@ -3401,6 +3410,30 @@ function wireStockTab() {
     btn.onclick = () => openEdit(btn.dataset.edit);
   });
   document.querySelectorAll("[data-legacy-edit]").forEach(btn => { btn.onclick = () => openEdit(btn.dataset.legacyEdit); });
+  document.querySelectorAll('[data-history-variant]').forEach(button => { button.onclick = () => {
+    const variant = allVariants().find(({variant:v}) => v.id === button.dataset.historyVariant || v.stockAliases?.includes(button.dataset.historyVariant))?.variant;
+    if (variant) openEdit(variant.id); else showAlert("สินค้านี้ถูกลบแล้ว");
+  }; });
+  document.querySelectorAll('[data-history-workspace]').forEach(button => { button.onclick = () => document.querySelector(`[data-workspace-tab="${button.dataset.historyWorkspace}"]`).click(); });
+  document.querySelectorAll('[data-stock-history-edit]').forEach(form => {
+    const expectedStock = JSON.stringify(products);
+    const expectedTransactions = JSON.stringify(transactions);
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const button = form.querySelector('[type="submit"]');
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        if (JSON.stringify(products) !== expectedStock || JSON.stringify(transactions) !== expectedTransactions) throw new Error("สต็อกหรือบัญชีเปลี่ยนแปลง กรุณาเปิดรายการล่าสุดอีกครั้ง");
+        const items = [...form.querySelectorAll('[data-history-item]')].map(row => Object.fromEntries(['qty','cost','price'].map(key => [key,Number(row.querySelector(`[name="${key}"]`).value)])));
+        const next = correctStockBatch(storeValues(), {id:form.dataset.stockHistoryEdit,expected:form.dataset.expected,items,date:form.querySelector('[name="date"]').value,shipping:Number(form.querySelector('[name="shipping"]').value)}, uid, new Date().toISOString());
+        products = next.products; transactions = next.transactions;
+        await saveData("products", "transactions");
+        render();
+      } catch (error) { if (!error.storageReported) showAlert(error.message); }
+      finally { button.disabled = false; }
+    };
+  });
   const mergeButton = document.getElementById("merge-data-btn");
   if (mergeButton)
     mergeButton.onclick = async () => {

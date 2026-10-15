@@ -342,7 +342,7 @@ for (const width of [390,1440]) {
     await page.getByRole('button',{name:'คืนของ',exact:true}).click();
     await expectSaved(page,db=>db.pendingOrders.some(o=>o.id==='order-xl' && o.qty===2));
     await page.locator('[data-workspace-tab="inventory"]').click();
-    await expect(page.locator('[data-stock-section="available"] [data-stock-variant="xl"]')).toHaveCount(0);
+    await expect(page.locator('[data-stock-section="available"] [data-stock-variant="xl"]')).toContainText('สินค้าหมด');
     await expect(page.locator('[data-stock-section="available"] [data-stock-variant="l"]')).toBeVisible();
     await expect(page.locator('[data-stock-section="soldout"] [data-stock-variant="xl"]')).toHaveCount(0);
     await page.locator('[data-workspace-tab="pending"]').click();

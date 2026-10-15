@@ -23,7 +23,7 @@ test('available stock hides empty new sizes from sold out while another size is 
   const soldout = page.locator('[data-stock-section="soldout"]');
   await expect(available).toBeVisible();
   await expect(soldout).toBeVisible();
-  await expect(available.locator('[data-edit]')).toHaveCount(1);
+  await expect(available.locator('[data-edit]')).toHaveCount(2);
   await expect(available.locator('[data-edit="available-variant"]')).toBeVisible();
   await expect(soldout.locator('[data-edit]')).toHaveCount(2);
   for (const id of ['soldout-used', 'legacy-negative']) {
@@ -32,8 +32,9 @@ test('available stock hides empty new sizes from sold out while another size is 
   }
   expect(await available.evaluate(element => Boolean(element.compareDocumentPosition(document.querySelector('[data-stock-section="soldout"]')) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
 
-  // Zero quantities never appear under ready-to-sell stock.
+  // Empty new sizes stay with their available color and show the sold-out label.
   await expect(available).toContainText('เสื้อ Crazsix');
+  await expect(available.locator('[data-stock-variant="soldout-new"]')).toContainText('สินค้าหมด');
   await expect(soldout).not.toContainText('เสื้อ Crazsix');
   await expect(soldout.locator('[data-edit="soldout-new"]')).toHaveCount(0);
   await page.locator('#stock-search').fill('เสื้อหมดสต็อกเท่านั้น');
@@ -174,6 +175,7 @@ test('new colors move to sold out only when every new size is empty, independent
     await expect(soldout.locator(`[data-edit="${id}"]`)).toHaveCount(0);
   }
   await expect(soldout.locator('[data-edit="white-empty"]')).toHaveCount(0);
+  await expect(available.locator('[data-edit="white-empty"]')).toBeVisible();
   for (const id of ['available-variant', 'soldout-new', 'white-used-empty']) {
     await expect(soldout.locator(`[data-edit="${id}"]`)).toBeVisible();
     await expect(available.locator(`[data-edit="${id}"]`)).toHaveCount(0);
