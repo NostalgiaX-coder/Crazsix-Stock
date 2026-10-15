@@ -344,7 +344,7 @@ for (const width of [390,1440]) {
     await page.locator('[data-workspace-tab="inventory"]').click();
     await expect(page.locator('[data-stock-section="available"] [data-stock-variant="xl"]')).toHaveCount(0);
     await expect(page.locator('[data-stock-section="available"] [data-stock-variant="l"]')).toBeVisible();
-    await expect(page.locator('[data-stock-section="soldout"] [data-stock-variant="xl"]')).toBeVisible();
+    await expect(page.locator('[data-stock-section="soldout"] [data-stock-variant="xl"]')).toHaveCount(0);
     await page.locator('[data-workspace-tab="pending"]').click();
     await expect(page.locator('.pending-receive-qty')).toHaveValue('2');
     expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);

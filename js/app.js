@@ -2517,7 +2517,8 @@ function renderStockTab() {
   const incomingGroups = pendingOrderGroups();
   const customerIncoming = incomingPreorders();
   const groups = stockColorGroups();
-  const isAvailable = (group, variant) => variant.qty > 0;
+  const hasAvailableNewSize = (group) =>
+    group.variants.some(({ variant }) => variant.type === "new" && variant.qty > 0);
   const splitGroups = (inStock) =>
     groups
       .map((group) => ({
@@ -2529,12 +2530,14 @@ function renderStockTab() {
           // Keep each order in one section, including orders for a new size.
           const matchedVariant = matchingStockOption(group.variants.map(({variant}) => variant), order);
           const matching = group.variants.find(({variant}) => variant === matchedVariant);
-          const belongsToAvailable = matching ? matching.variant.qty > 0
+          const belongsToAvailable = order.type === "new" ? hasAvailableNewSize(group)
+            : matching ? matching.variant.qty > 0
             : group.variants.some(({variant}) => variant.type === order.type && variant.qty > 0);
           return belongsToAvailable === inStock;
         }),
         variants: group.variants.filter(({ variant }) =>
-          isAvailable(group, variant) === inStock,
+          inStock ? variant.qty > 0
+            : variant.qty <= 0 && (variant.type !== "new" || !hasAvailableNewSize(group)),
         ),
       }))
       .filter((group) => group.variants.length > 0);
