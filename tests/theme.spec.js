@@ -33,7 +33,7 @@ test('report charts update colors in place and cross-tab theme changes preserve 
 for(const width of [390,1440]) test(`dark surfaces, dialogs and readable text at ${width}px`,async({page})=>{
  await page.setViewportSize({width,height:width===390?844:1000});const errors=await boot(page);
  await page.screenshot({path:`test-results/dark-home-${width}.png`,fullPage:true});
- await expect(page.locator('body')).toHaveCSS('background-color','rgb(18, 23, 31)');
+ await expect(page.locator('body')).toHaveCSS('background-color','rgb(16, 22, 37)');
  await nav(page,'ads');await expect(page.locator('#ad-create-form [name="name"]')).toHaveCSS('background-color','rgb(21, 28, 38)');
  await page.screenshot({path:`test-results/dark-ads-${width}.png`,fullPage:true});
  await nav(page,'stock');await page.locator('[data-edit="variant-1"]').click();await expect(page.locator('#edit-overlay .modal-box')).toHaveCSS('background-color','rgb(32, 41, 54)');

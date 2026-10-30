@@ -420,3 +420,11 @@ test('entering an unknown legacy cost and saving without changing quantity remem
   expect((await snapshot(page)).pendingOrders[0].cost).toBe(101.25);
   expect(errors).toEqual([]);
 });
+test('receipt correction reconnects a previously cancelled remainder to its original purchase', async ({page}) => {
+  const state=seed();const original=state.pendingOrders.find(o=>o.id==='stock1');
+  state.transactions.push({id:'purchase',type:'expense',category:'สั่งซื้อสินค้า (รอของมาส่ง)',amount:400,date:today(),pendingIds:['stock1'],purchaseItems:[structuredClone(original)]});
+  await boot(page,state);await pending(page);await stockRow(page).locator('.pending-select').check();await stockRow(page).locator('.pending-receive-qty').fill('2');await receive(page);await expectSaved(page,db=>db.pendingOrders.find(o=>o.id==='stock1')?.qty===2);
+  await page.locator('[data-cancel-pending="stock1"]').click();await page.locator('#modal-ok-btn').click();await expectSaved(page,db=>!db.pendingOrders.some(o=>o.id==='stock1'));
+  await page.locator('[data-workspace-tab="history"]').click();await page.locator('#workspace-history .receipt-lot > summary').first().click();const form=page.locator('[data-receipt-edit]');await form.locator('[name="qty"]').fill('1');await form.locator('[type="submit"]').click();
+  await expectSaved(page,db=>db.pendingOrders.find(o=>o.id==='stock1')?.qty===1);const db=await snapshot(page);expect(db.transactions.find(t=>t.id==='purchase')).toMatchObject({amount:200,pendingIds:['stock1']});
+});

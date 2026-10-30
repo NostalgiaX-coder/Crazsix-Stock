@@ -1,3 +1,4 @@
+import { prepareSales, prepareInstallmentPayments } from './sales.js';
 import { recordStockBatch, correctStockBatch, renderStockHistory, validStockHistory } from "./stock-history.js";
 import { renderReceivingHistory } from "./receiving-ui.js";
 import { allocateReceiving, prepareReceivingLot, validateReceivingLots, correctReceivingLot, receivingCandidates } from "./receiving-lots.js";
@@ -269,7 +270,7 @@ document.querySelectorAll(".modal-overlay").forEach((overlay) =>
   }),
 );
 window.addEventListener("beforeunload", (event) => {
-  if (!formDirty && !savingStores.size) return;
+  if (!formDirty && !savingStores.size && !saleCart.length) return;
   event.preventDefault();
   event.returnValue = "";
 });
@@ -1297,150 +1298,22 @@ function addDaysStr(days) {
   return localDateStr(d);
 }
 
+function prepareSaleRows(rows) {
+  return prepareSales(storeValues(), rows, { id: uid, date: todayStr(), dueDate: addDaysStr, label: variantLabel });
+}
+async function commitSaleRows(rows) {
+  const next = prepareSaleRows(rows);
+  products = next.products;
+  transactions = next.transactions;
+  await saveData("products", "transactions", ...(next.usesCampaign ? ["adCampaigns"] : []));
+  return next.sales;
+}
 async function sellVariant(variantId, data) {
-  const found = findVariant(variantId);
-  if (!found) return;
-  const { product, variant } = found;
-  const qty = Number(data.qty);
-  const sellPrice = Number(data.sellPrice);
-  const shipping = Number(data.shipping || 0);
-  const commission = Number(data.commission || 0);
-  const isInstallment = !!data.installment;
-  if (!Number.isInteger(qty) || qty < 1) {
-    showAlert("ระบุจำนวนที่จะขายเป็นจำนวนเต็มมากกว่า 0");
-    return;
-  }
-  if (qty > variant.qty) {
-    showAlert("สินค้าคงเหลือไม่พอ (เหลือ " + variant.qty + " ชิ้น)");
-    return;
-  }
-  if (!validCash(sellPrice) || sellPrice <= 0 || !validCash(money(sellPrice * qty))) {
-    showAlert("ระบุราคาขายจริงให้ถูกต้อง");
-    return;
-  }
-  if (
-    !validCash(shipping) ||
-    shipping < 0 ||
-    !validCash(commission) ||
-    commission < 0
-  ) {
-    showAlert("ค่าส่งและค่ากลางต้องเป็นตัวเลขตั้งแต่ 0 ขึ้นไป");
-    return;
-  }
-
-  const revenue = money(sellPrice * qty);
-  const deposit = Number(data.deposit || 0);
-  const dueDays = Number(data.dueDays || 30);
-  if (isInstallment && (!validCash(deposit) || deposit < 0 || deposit > revenue ||
-      !Number.isSafeInteger(dueDays) || dueDays < 1 || dueDays > 3650)) {
-    showAlert("มัดจำต้องตั้งแต่ 0 และไม่เกินยอดขาย วันครบกำหนดต้องเป็นจำนวนเต็ม 1–3650 วัน");
-    return;
-  }
-  const campaign = data.adCampaignId ? adCampaigns.find(c => c.id === data.adCampaignId && campaignHasProduct(c, product.id)) : null;
-  if (data.adCampaignId && !campaign) { showAlert("ไม่พบแคมเปญของสินค้านี้ กรุณาเลือกใหม่"); return; }
-  const adReservePerUnit = campaign ? (String(data.adReservePerUnit ?? '').trim() === '' ? campaign.reservePerUnit : Number(data.adReservePerUnit)) : null;
-  if (adReservePerUnit != null && (!validCash(adReservePerUnit) || adReservePerUnit < 0 || !validCash(money(adReservePerUnit * qty)))) { showAlert("ยอดแบ่งยิงแอดต้องตั้งแต่ 0 และมีทศนิยมไม่เกิน 2 ตำแหน่ง"); return; }
-  const personalUsePercent = Number(data.personalUsePercent || 0);
-  if (!validPersonalPercent(personalUsePercent)) {
-    showAlert("เปอร์เซ็นต์เงินใช้ส่วนตัวต้องอยู่ระหว่าง 0–100 และมีทศนิยมไม่เกิน 2 ตำแหน่ง"); return;
-  }
-  const customerNote = String(data.customerNote || "").trim();
-  if (customerNote.length > 2000) { showAlert("ข้อมูลผู้รับต้องไม่เกิน 2,000 ตัวอักษร"); return; }
-  variant.qty -= qty;
-
-  const profit = money(revenue - variant.cost * qty - shipping - commission);
-
-  if (isInstallment) {
-    const saleId = uid();
-    const note = (data.customerNote || "").trim();
-    transactions.unshift({
-      id: saleId,
-      type: "installment",
-      category: "ขายสินค้า",
-      desc:
-        variantLabel(product, variant) +
-        " x" +
-        qty +
-        (note ? " — " + note : "") +
-        " (ผ่อนชำระ)",
-      amount: revenue,
-      date: todayStr(),
-      productId: variant.id,
-      qty,
-      unitPrice: sellPrice,
-      unitCost: variant.cost,
-      shipping,
-      commission,
-      profit,
-      stockProductId: product.id,
-      deliveryStatus: "pending",
-      ...measurementsOf(variant),
-      personalUsePercent,
-      ...(campaign ? { adCampaignId: campaign.id, ...(adReservePerUnit != null ? { adReservePerUnit } : {}) } : {}),
-      paidAmount: deposit,
-      dueDate: addDaysStr(data.dueDays),
-      customerNote: note,
-    });
-    if (deposit > 0) {
-      transactions.unshift({
-        id: uid(),
-        type: "income",
-        category: "รับชำระค่าผ่อน (มัดจำแรก)",
-        desc: variantLabel(product, variant),
-        amount: deposit,
-        date: todayStr(),
-        installmentId: saleId,
-        productId: variant.id,
-      });
-    }
-  } else {
-    transactions.unshift({
-      id: uid(),
-      type: "income",
-      category: "ขายสินค้า",
-      desc: variantLabel(product, variant) + " x" + qty,
-      customerNote,
-      deliveryStatus: "pending",
-      amount: revenue,
-      date: todayStr(),
-      productId: variant.id,
-      qty,
-      unitPrice: sellPrice,
-      unitCost: variant.cost,
-      shipping,
-      commission,
-      profit,
-      stockProductId: product.id,
-      ...measurementsOf(variant),
-      personalUsePercent,
-      ...(campaign ? { adCampaignId: campaign.id, ...(adReservePerUnit != null ? { adReservePerUnit } : {}) } : {}),
-    });
-  }
-  if (shipping > 0) {
-    transactions.unshift({
-      id: uid(),
-      type: "expense",
-      category: "ค่าส่ง",
-      desc: variantLabel(product, variant) + " x" + qty,
-      amount: shipping,
-      date: todayStr(),
-      productId: variant.id,
-    });
-  }
-  if (commission > 0) {
-    transactions.unshift({
-      id: uid(),
-      type: "expense",
-      category: "ค่ากลาง",
-      desc: variantLabel(product, variant) + " x" + qty,
-      amount: commission,
-      date: todayStr(),
-      productId: variant.id,
-    });
-  }
-  await saveData("products", "transactions", ...(campaign ? ["adCampaigns"] : []));
-  render();
-  toast("บันทึกการขายแล้ว · สินค้าอยู่ในเมนูรอส่ง");
+  try {
+    await commitSaleRows([{ variantId, data }]);
+    render();
+    toast("บันทึกการขายแล้ว · สินค้าอยู่ในเมนูรอส่ง");
+  } catch (error) { if (!error.storageReported) showAlert(error.message); }
 }
 
 function openInstallments() {
@@ -1450,34 +1323,12 @@ function openInstallments() {
 }
 
 async function recordInstallmentPayment(saleTxId, amountStr) {
-  const sale = transactions.find(
-    (t) => t.id === saleTxId && t.type === "installment" && t.deliveryStatus !== "cancelled",
-  );
-  if (!sale) return false;
-  const amount = Number(amountStr);
-  const remaining = sale.amount - (sale.paidAmount || 0);
-  if (!validCash(amount) || amount <= 0) {
-    showAlert("ระบุจำนวนเงินให้ถูกต้อง");
-    return false;
-  }
-  if (amount > remaining + 0.001) {
-    showAlert("จำนวนเงินเกินยอดค้างชำระ (" + fmtMoney(remaining) + ")");
-    return false;
-  }
-  sale.paidAmount = money((sale.paidAmount || 0) + amount);
-  transactions.unshift({
-    id: uid(),
-    type: "income",
-    category: "รับชำระค่าผ่อน",
-    desc: sale.desc,
-    amount,
-    date: todayStr(),
-    installmentId: sale.id,
-    productId: sale.productId,
-  });
-  await saveTx();
-  render();
-  return true;
+  try {
+    transactions = prepareInstallmentPayments(transactions, [{ saleId: saleTxId, amount: amountStr }], { id: uid, date: todayStr() });
+    await saveTx();
+    render();
+    return true;
+  } catch (error) { if (!error.storageReported) showAlert(error.message); return false; }
 }
 
 async function commitAdAction(action) {
@@ -1666,6 +1517,9 @@ const tabMeta = {
     "box",
     "จัดการสินค้า เติมสต็อก และรับสินค้าเข้า",
   ],
+  purchase: ["สั่งซื้อ · จ่ายแล้วรอของ", "สั่งซื้อรอของ", "bag", "ลงเงินที่จ่ายแล้ว เพิ่มหลายสินค้า/สี/ไซซ์ในครั้งเดียว และรับเข้าเมื่อของถึง"],
+  receiving: ["รับสินค้าเข้าร้าน", "รับของ / ประวัติ", "box", "เลือกรับหลายรายการ รับบางส่วน แบ่งค่าส่ง และแก้ไขล็อตย้อนหลัง"],
+  allocation: ["แบ่งเงินจากการขาย", "แบ่งเงิน", "wallet", "เงินใช้ส่วนตัวและเงินเก็บยิงแอด แยกแผนจากเงินที่รับจริง"],
   ads: ["ยิงแอดและต้นทุนโฆษณา", "ยิงแอด", "chart", "ผูกสินค้า เติมเครดิต ติดตามกำไร และเก็บเงินยิงแอดต่อ"],
   preorder: ["Pre-order ลูกค้า", "Pre-order ลูกค้า", "clock", "รับจอง ติดตามมัดจำ และส่งมอบสินค้าที่ลูกค้าพรีกับร้าน"],
   sell: ["ขายสินค้า", "ขายสินค้า", "bag", "พร้อมสำหรับออเดอร์ถัดไปของคุณ"],
@@ -1697,6 +1551,9 @@ const tabMeta = {
   ],
 };
 let stockWorkspace = "inventory";
+let saleCart = [];
+let salesBatchBusy = false;
+let paymentsBatchBusy = false;
 let inventorySearch = "";
 let inventoryStatus = "all";
 let inventoryCondition = "all";
@@ -1743,6 +1600,8 @@ function navigateTo(tab, workspace) {
   activeTab = tabMeta[tab] ? tab : "home";
   if (activeTab !== "tx") editingTransaction = null;
   if (workspace) stockWorkspace = workspace;
+  else if (activeTab === "purchase") stockWorkspace = "add";
+  else if (activeTab === "receiving") stockWorkspace = "pending";
   history.replaceState(null, "", "#" + activeTab);
   render();
   window.scrollTo({ top: 0, behavior: "instant" });
@@ -1793,7 +1652,7 @@ function render() {
       <div class="sidebar-bottom"><div class="workspace-note">${icon("sparkles")}<strong>Small store. Big possibilities.</strong><p>ดูแลร้านให้คล่องตัว<br>มีเวลาให้สิ่งที่คุณรักมากขึ้น</p></div><div class="store-profile"><span class="avatar">C</span><div><strong>Crazsix Store</strong><small>ระบบจัดการร้านเสื้อผ้า</small></div><span class="online-dot" title="โหลดข้อมูลแล้ว"></span></div></div>
     </aside>
     <main class="main-content" id="main-content">
-      <div class="topbar"><div class="breadcrumb">Workspace <span>/</span> <strong>${meta[1]}</strong></div><div class="topbar-right">${themeToggle()}<span class="sync-status"><span class="online-dot"></span>เชื่อมต่อแล้ว</span><span class="topbar-date">${icon("calendar")}${dateLabel}</span><span class="avatar avatar-small">C</span></div></div>
+      <div class="topbar"><div class="breadcrumb">Workspace <span>/</span> <strong>${meta[1]}</strong></div><div class="topbar-right"><select id="workspace-jump" class="workspace-jump" aria-label="ไปยังเมนูทั้งหมด">${Object.entries(tabMeta).map(([key,item])=>`<option value="${key}" ${key===activeTab?'selected':''}>${item[1]}</option>`).join('')}</select>${themeToggle()}<span class="sync-status"><span class="online-dot"></span>เชื่อมต่อแล้ว</span><span class="topbar-date">${icon("calendar")}${dateLabel}</span><span class="avatar avatar-small">C</span></div></div>
       <header class="page-header"><div><p class="eyebrow">${activeTab === "home" ? "YOUR STORE, AT A GLANCE" : "CRAZSIX STORE"}</p><h1>${meta[0]}<span class="heading-dot">.</span></h1><p class="subline">${meta[3]}</p></div><div class="header-actions"><button class="btn btn-ghost" data-go="stock" data-workspace="add">${icon("plus")}เพิ่มสินค้า</button><button class="btn btn-primary" data-go="sell">${icon("bag")}บันทึกการขาย</button></div></header>
       ${activeTab === "home" ? `<section class="stats" aria-label="สรุปร้านเดือนนี้">${metric("มูลค่าสต็อก", fmtMoney(stockValue()), `${products.length} สินค้า · คงเหลือ ${totalQty.toLocaleString("th-TH")} ชิ้น`, "box")}${metric("รายรับเดือนนี้", fmtMoney(ms.income), "ไม่รวมยอดขายและ pre-order ที่ยกเลิก", "up", "income-stat")}${metric("รายจ่ายเดือนนี้", fmtMoney(ms.expense), "รวมต้นทุนและค่าใช้จ่าย ไม่รวมเงินคืนรายการยกเลิก", "down", "expense-stat")}${metric("แบ่งใช้ส่วนตัวเดือนนี้", fmtMoney(ms.personalUse), "ตามยอดขายเดือนนี้ รวมรายการผ่อน · หักออกจากกำไรขายแล้ว", "wallet", "personal-use-stat")}${metric("เงินสุทธิเดือนนี้", fmtMoney(ms.profit), "รายรับ − รายจ่าย", "wallet", "profit")}</section>` : ""}
       <div id="tab-content" class="tab-content"></div>
@@ -1806,6 +1665,7 @@ function render() {
     e.preventDefault();
     navigateTo("home");
   };
+  document.getElementById("workspace-jump").onchange = event => navigateTo(event.target.value);
   document.getElementById("reset-btn").onclick = resetAll;
   document.getElementById("export-btn").onclick = () => {
     exportData();
@@ -1818,7 +1678,8 @@ function render() {
   if (activeTab === "tasks") content.innerHTML = renderTasksTab();
   else if (activeTab === "home")
     content.innerHTML = renderDashboard() + renderHomeTab();
-  else if (activeTab === "stock") content.innerHTML = renderStockTab();
+  else if (["stock", "purchase", "receiving"].includes(activeTab)) content.innerHTML = renderStockTab();
+  else if (activeTab === "allocation") content.innerHTML = renderAllocationTab();
   else if (activeTab === "preorder") content.innerHTML = renderPreordersTab();
   else if (activeTab === "ads") content.innerHTML = renderAds(storeValues(), { today: todayStr(), esc: escapeHtml, fmt: fmtMoney, metric });
   else if (activeTab === "sell") content.innerHTML = renderSellTab();
@@ -1843,7 +1704,16 @@ function render() {
   wireTxTab();
   wireReportTab();
   wireAiTab();
-  if (activeTab === "stock") setupStockWorkspace(content);
+  if (["stock", "purchase", "receiving"].includes(activeTab)) {
+    setupStockWorkspace(content);
+    if (activeTab === "purchase") {
+      const pendingMode = document.querySelector('#mode-toggle [value="pending"]');
+      pendingMode.checked = true;
+      pendingMode.dispatchEvent(new Event("change", { bubbles: true }));
+      const heading = document.querySelector('#workspace-add > h2');
+      if (heading) heading.textContent = "สั่งซื้อหลายรายการ · จ่ายแล้วรอของ";
+    }
+  }
   document
     .querySelectorAll("[data-go]")
     .forEach(
@@ -1878,9 +1748,14 @@ function setupStockWorkspace(content) {
   countPanel.className = "panel";
   countPanel.innerHTML = renderStocktake();
   content.append(countPanel);
+  const purchaseHistoryPanel = document.createElement("section");
+  purchaseHistoryPanel.className = "panel";
+  purchaseHistoryPanel.innerHTML = renderPurchaseHistory();
+  content.append(purchaseHistoryPanel);
   const workspaces = [
+    ["purchase-history", "ประวัติสั่งซื้อ", purchaseHistoryPanel],
     ["inventory", "รายการสินค้า", panels[4]],
-    ["add", "เพิ่ม / เติมสต็อก", panels[0]],
+    ["add", activeTab === "purchase" ? "สั่งซื้อใหม่ (จ่ายแล้ว)" : "เพิ่ม / เติม / สั่งซื้อ", panels[0]],
     ["pending", `รอรับของ (${pendingOrders.length + incomingPreorders().length})`, panels[1]],
     ["history", "รับของแล้ว", panels[2]],
     ["shipping", "บันทึกค่าส่ง", panels[3]],
@@ -1986,6 +1861,7 @@ function setupStockWorkspace(content) {
     .forEach((b) => (b.onclick = () => select(b.dataset.workspaceTab)));
   select(stockWorkspace);
   wireStocktake();
+  wirePurchaseHistory();
 }
 function toast(message) {
   let el = document.getElementById("toast");
@@ -2666,7 +2542,7 @@ function renderStockTab() {
             <label>บันทึกเพิ่มเติม (เช่น เลขคำสั่งซื้อ, ร้านที่สั่ง) — ใช้ร่วมทั้งออเดอร์</label>
             <input type="text" name="pendingNote" placeholder="ไม่บังคับ">
           </div>
-          <p class="hint" style="grid-column:1/-1; margin:2px 0 0;">ใช้ตอนโอนเงินจ่ายค่าสินค้าไปแล้วแต่ของยังไม่ถึงร้าน ระบบจะรวมยอดทุกรายการเป็นรายจ่าย 1 ก้อนทันที แต่ยัง<strong>ไม่เพิ่มเข้าสต็อก</strong>จนกว่าจะกด "ยืนยันได้รับของแล้ว" ทีละรายการ — ถ้าเลือก "เหมาทั้งล็อต" ระบบจะหารเฉลี่ยต้นทุนต่อชิ้นตามสัดส่วนจำนวนให้เอง — ค่าส่งจะยังไม่ถูกบันทึก จนกว่าจะจ่ายจริงตอนได้รับของ</p>
+          <p class="hint" style="grid-column:1/-1; margin:2px 0 0;">ใช้ตอนโอนเงินจ่ายค่าสินค้าไปแล้วแต่ของยังไม่ถึงร้าน ระบบจะรวมยอดทุกรายการเป็นรายจ่าย 1 ก้อนทันที แต่ยัง<strong>ไม่เพิ่มเข้าสต็อก</strong>จนกว่าจะเลือกสินค้าที่มาถึงแล้วกด "ยืนยันได้รับของที่เลือกแล้ว" โดยรับหลายรายการและรับบางส่วนได้ — ถ้าเลือก "เหมาทั้งล็อต" ระบบจะหารเฉลี่ยต้นทุนต่อชิ้นตามสัดส่วนจำนวนให้เอง — ค่าส่งจะยังไม่ถูกบันทึก จนกว่าจะจ่ายจริงตอนได้รับของ</p>
         </div>
 
         <div style="margin-top:12px;"><button type="submit" class="btn btn-primary" id="add-product-submit">เพิ่มสินค้า</button></div>
@@ -2675,6 +2551,7 @@ function renderStockTab() {
     </div>
 
     <div class="panel">
+      <div class="pending-lot-editor">${renderPurchaseHistory()}</div>
       <h2>สินค้าที่สั่งซื้อแล้ว รอรับของ${incomingGroups.length + customerIncoming.length > 0 ? " (" + (incomingGroups.length + customerIncoming.length) + " รายการ)" : ""}</h2>
       <p class="hint">รวมสินค้าของร้านและพรีออเดอร์ที่ติ๊กว่าสั่งให้ลูกค้าแล้ว เลือกของที่มาถึงพร้อมกัน ระบุจำนวนรับและค่าส่งรวมครั้งเดียวได้ สินค้าของร้านจะเข้าสต็อก ส่วนพรีออเดอร์จะอัปเดตว่าของถึงแล้วให้ลูกค้าคนนั้น รับบางส่วนได้โดยรายการที่เหลือยังรอรับอยู่</p>
       ${
@@ -3679,9 +3556,10 @@ function renderSellTab() {
         <p class="hint sell-ad-preview" aria-live="polite"></p>
         <div class="field"><label>แบ่งเงินใช้ส่วนตัว (% ของยอดขายเต็ม)</label><input class="sell-personal-percent" type="number" min="0" max="100" step="0.01" value="0" aria-label="เปอร์เซ็นต์เงินใช้ส่วนตัว"><p class="hint sell-personal-preview" aria-live="polite"></p></div>
         <div class="sale-total" aria-live="polite"><span>ยอดขายรวม / กำไรหลังแบ่งใช้ส่วนตัว</span><b class="sale-total-value"></b></div>
-        <button class="btn btn-gold btn-sm sell-submit" style="width:100%; margin-top:10px;" data-sell="${first.id}">${icon("bag")}บันทึกการขาย</button>
+
         <div class="checkline" style="margin-top:10px;"><input type="checkbox" class="sell-installment"><label>ลูกค้าผ่อนชำระ (ไม่ได้เงินก้อนเดียว)</label></div>
         <div class="field sell-installment-fields" style="display:none; margin-top:6px;"><label>ผ่อนชำระให้ครบภายใน (วัน)</label><input class="sell-due-days" type="number" min="1" value="30"><label style="margin-top:6px;">มัดจำที่ได้รับตอนนี้ (ถ้ามี)</label><input class="sell-deposit" type="number" min="0" step="0.01" value="0"></div><div class="field"><label>ลูกค้า / ผู้รับ / เลขคำสั่งซื้อ (ถ้ามี)</label><input class="sell-customer" type="text" maxlength="2000" placeholder="เช่น ชื่อลูกค้า, เบอร์โทร"><p class="hint">บันทึกการขายแล้วจะอยู่ในสถานะรอส่ง</p></div>
+        <div class="sale-card-actions"><button type="button" class="btn btn-primary sell-add-cart">${icon("plus")}เพิ่มในตะกร้า</button><button type="button" class="btn btn-ghost btn-sm sell-submit" data-sell="${first.id}">ขายรายการนี้ทันที</button></div>
       </div>`;
     })
     .join("");
@@ -3694,6 +3572,7 @@ function renderSellTab() {
     : "";
 
   return `
+    <section class="panel sale-cart-panel" id="sale-cart-panel" aria-label="ตะกร้าขายหลายรายการ">${renderSaleCart()}</section>
     <div class="panel">
       <div class="section-heading"><h2>เลือกสินค้าที่ต้องการขาย</h2><button class="btn btn-ghost" data-go="shipments">รอส่ง (${pendingDeliveries(transactions,shipments).length})</button></div>
       <p class="hint">ใส่ราคาขายจริง ค่าส่ง และค่ากลาง (ถ้ามี) แล้วบันทึกการขาย ระบบจะตัดสต็อก บันทึกยอดขาย และนำสินค้าเข้ารอส่ง กดส่งสินค้าแล้วได้จากเมนูรอส่ง</p>
@@ -3816,25 +3695,21 @@ function wireSellTab() {
       );
     syncSaleCard(card);
   });
-  document.querySelectorAll("[data-sell]").forEach((btn) => {
+  document.querySelectorAll("[data-sell]").forEach(btn => {
+    btn.onclick = () => sellVariant(btn.dataset.sell, readSaleCard(btn.closest("[data-sale-card]")));
+  });
+  document.querySelectorAll(".sell-add-cart").forEach(btn => {
     btn.onclick = () => {
-      const id = btn.dataset.sell;
-      const card = btn.closest("[data-sale-card]");
-      sellVariant(id, {
-        qty: card.querySelector(".sell-qty").value,
-        sellPrice: card.querySelector(".sell-price-input").value,
-        shipping: card.querySelector(".sell-shipping").value,
-        commission: card.querySelector(".sell-commission").value,
-        installment: card.querySelector(".sell-installment").checked,
-        dueDays: card.querySelector(".sell-due-days").value,
-        deposit: card.querySelector(".sell-deposit").value,
-        customerNote: card.querySelector(".sell-customer").value,
-        adCampaignId: card.querySelector(".sell-ad-campaign").value,
-        adReservePerUnit: card.querySelector(".sell-ad-reserve").value,
-        personalUsePercent: card.querySelector(".sell-personal-percent").value,
-      });
+      const card = btn.closest("[data-sale-card]"), variantId = card.querySelector(".sell-size-select").value;
+      const row = { key: uid(), variantId, expectedVariant: JSON.stringify(findVariant(variantId)?.variant), data: readSaleCard(card) };
+      try { prepareSaleRows([...saleCart, row]); } catch (error) { showAlert(error.message); return; }
+      saleCart.push(row);
+      formDirty = true;
+      updateSaleCart();
+      toast("เพิ่มในตะกร้าแล้ว · เลือกสี/ไซซ์หรือสินค้าอื่นต่อได้");
     };
   });
+  wireSaleCart();
 }
 
 // ---------- Installments tab ----------
@@ -3871,6 +3746,7 @@ function renderInstallmentsTab() {
   ).length;
   return `
     <section class="stats installment-stats" aria-label="สรุปการผ่อนชำระ">${metric("ยอดค้างชำระ", fmtMoney(balance), `${outstanding.length} รายการที่ยังรับไม่ครบ`, "wallet")}${metric("เกินกำหนด", overdueCount.toLocaleString("th-TH"), "รายการที่ควรติดตามก่อน", "clock", "expense-stat")}${metric("ชำระครบแล้ว", settled.length.toLocaleString("th-TH"), "รายการผ่อนที่ปิดยอดแล้ว", "check", "income-stat")}</section>
+    ${outstanding.length ? `<section class="panel"><details class="batch-payment"><summary>รับชำระหลายรายการพร้อมกัน (${outstanding.length} รายการค้าง)</summary><form id="batch-payment-form"><p class="hint">เลือกเฉพาะยอดที่ได้รับเงินจริง กรอกยอดแต่ละรายการ แล้วตรวจและบันทึกครั้งเดียว</p><label class="checkline"><input type="checkbox" id="batch-payment-all">เลือกทุกรายการ</label>${outstanding.map(t=>`<div class="batch-payment-row"><label class="checkline"><input type="checkbox" name="selected" value="${escapeHtml(t.id)}"><span>${escapeHtml(t.desc)}<small>ค้าง ${fmtMoney(t.amount-(t.paidAmount||0))}</small></span></label><div class="field"><label>รับครั้งนี้</label><input type="number" name="amount-${escapeHtml(t.id)}" min="0.01" max="${money(t.amount-(t.paidAmount||0))}" step="0.01" value="${money(t.amount-(t.paidAmount||0))}" disabled required></div></div>`).join('')}<p id="batch-payment-summary" class="cart-summary" role="status"></p><button class="btn btn-primary" type="submit" id="batch-payment-submit" disabled>ตรวจสอบและรับชำระที่เลือก</button></form></details></section>` : ''}
     <div class="panel">
       <h2>ลูกหนี้ผ่อนชำระ</h2>
       <p class="hint">ยอดขายแบบผ่อนชำระจะยังไม่นับเป็น "รายรับ" จนกว่าจะได้รับเงินจริง (นับกำไร/จำนวนขายทันทีเพื่อสถิติสินค้า) ส่วนนี้ใช้ติดตามว่าใครค้างชำระอยู่เท่าไหร่และครบกำหนดเมื่อไหร่</p>
@@ -3900,6 +3776,7 @@ function renderInstallmentsTab() {
 }
 
 function wireInstallmentsTab() {
+  wireBatchPayments();
   document.querySelectorAll("[data-pay]").forEach((btn) => {
     btn.onclick = () => openPaymentModal(btn.dataset.pay);
   });
@@ -4485,6 +4362,8 @@ new MutationObserver(() => enhanceUI()).observe(app, {
   subtree: true,
 });
 if (tabMeta[location.hash.slice(1)]) activeTab = location.hash.slice(1);
+if (activeTab === "purchase") stockWorkspace = "add";
+if (activeTab === "receiving") stockWorkspace = "pending";
 window.addEventListener("hashchange", () => {
   if (tabMeta[location.hash.slice(1)]) navigateTo(location.hash.slice(1));
 });
@@ -4881,4 +4760,124 @@ async function receiveMixedLot(data) {
 
 function pendingAllocationFields() {
   return `<div class="field pending-weight-field" hidden><label>น้ำหนักรวมที่รับ</label><input class="pending-weight" type="number" min="0" step="any" placeholder="ใช้หน่วยเดียวกันทุกแถว"></div><div class="field pending-share-field" hidden><label>ส่วนแบ่งค่าส่ง (บาท)</label><input class="pending-share" type="number" min="0" step="0.01" value="0"></div><span class="hint pending-share-preview"></span>`;
+}
+
+// The cart holds a draft only; checkout persists every line in one existing store transaction.
+function readSaleCard(card) {
+  return Object.fromEntries([
+    ['qty', '.sell-qty'], ['sellPrice', '.sell-price-input'], ['shipping', '.sell-shipping'],
+    ['commission', '.sell-commission'], ['dueDays', '.sell-due-days'], ['deposit', '.sell-deposit'],
+    ['customerNote', '.sell-customer'], ['adCampaignId', '.sell-ad-campaign'],
+    ['adReservePerUnit', '.sell-ad-reserve'], ['personalUsePercent', '.sell-personal-percent']
+  ].map(([key, selector]) => [key, card.querySelector(selector).value]).concat([['installment', card.querySelector('.sell-installment').checked]]));
+}
+function renderSaleCart() {
+  return `<div class="section-heading"><div><p class="eyebrow">MULTI-ITEM CHECKOUT</p><h2>ตะกร้าขายหลายรายการ <span class="tag preorder">${saleCart.length} รายการ</span></h2></div><button type="button" class="btn btn-ghost btn-sm" id="sale-cart-clear" ${saleCart.length ? '' : 'disabled'}>ล้างตะกร้า</button></div>
+    <p class="hint">เลือกสินค้า สี และไซซ์ด้านล่างแล้วเพิ่มในตะกร้าได้หลายครั้ง แต่ละรายการเก็บราคา ค่าส่ง ค่ากลาง ผ่อน และอัตราแบ่งเงินของตัวเอง</p>
+    ${saleCart.length ? `<div class="sale-cart-rows">${saleCart.map(row => {
+      const found = findVariant(row.variantId), data = row.data;
+      return `<article class="sale-cart-row" data-cart-key="${row.key}"><div><strong>${escapeHtml(found ? variantLabel(found.product, found.variant) : 'สินค้าถูกลบ')}</strong><p class="hint">${escapeHtml(data.customerNote || 'ยังไม่ระบุผู้รับ')} · ${data.installment ? 'ผ่อน / มัดจำ '+fmtMoney(data.deposit) : 'รับเต็ม'} · ส่วนตัว ${escapeHtml(data.personalUsePercent)}% · ค่าส่ง ${fmtMoney(data.shipping)} · ค่ากลาง ${fmtMoney(data.commission)}</p></div><div class="field"><label>จำนวน</label><input data-cart-field="qty" type="number" min="1" step="1" value="${escapeHtml(data.qty)}"></div><div class="field"><label>ราคาขาย / ชิ้น</label><input data-cart-field="sellPrice" type="number" min="0.01" step="0.01" value="${escapeHtml(data.sellPrice)}"></div><button type="button" class="btn btn-ghost btn-sm" data-cart-remove="${row.key}">นำออก</button></article>`;
+    }).join('')}</div><p id="sale-cart-summary" class="cart-summary" role="status"></p><button type="button" id="sale-cart-checkout" class="btn btn-primary">ตรวจสอบและบันทึกทั้งหมด</button>` : '<div class="cart-empty">ตะกร้ายังว่าง · เพิ่มได้หลายสินค้า หลายสี และหลายไซซ์ ก่อนยืนยันครั้งเดียว</div>'}`;
+}
+function updateSaleCartSummary() {
+  const summary = document.getElementById('sale-cart-summary');
+  if (!summary) return;
+  try {
+    const next = prepareSaleRows(saleCart);
+    const revenue = money(next.sales.reduce((n,s) => n+s.amount,0));
+    const income = money(next.sales.reduce((n,s) => n+(s.type === 'installment' ? s.paidAmount : s.amount),0));
+    summary.textContent = `${saleCart.length} รายการ · ${next.sales.reduce((n,s)=>n+s.qty,0)} ชิ้น · ยอดขาย ${fmtMoney(revenue)} · รับจริง ${fmtMoney(income)} · ค้าง ${fmtMoney(money(revenue-income))} · ใช้ส่วนตัว ${fmtMoney(next.sales.reduce((n,s)=>n+personalUseAmount(s),0))}`;
+    summary.classList.remove('danger-text');
+  } catch (error) { summary.textContent=error.message; summary.classList.add('danger-text'); }
+}
+function updateSaleCart() {
+  const panel=document.getElementById('sale-cart-panel');
+  if (!panel) return;
+  panel.innerHTML=renderSaleCart(); wireSaleCart(); enhanceUI();
+}
+function wireSaleCart() {
+  const panel=document.getElementById('sale-cart-panel'); if (!panel) return;
+  panel.querySelectorAll('[data-cart-field]').forEach(input => { input.oninput=()=>{
+    const row=saleCart.find(row=>row.key===input.closest('[data-cart-key]').dataset.cartKey);
+    row.data[input.dataset.cartField]=input.value; formDirty=true; updateSaleCartSummary();
+  }; });
+  panel.querySelectorAll('[data-cart-remove]').forEach(button=>{button.onclick=()=>{saleCart=saleCart.filter(row=>row.key!==button.dataset.cartRemove);updateSaleCart();};});
+  panel.querySelector('#sale-cart-clear').onclick=async()=>{if(await showConfirm('ล้างรายการในตะกร้า? ยังไม่มีรายการใดถูกบันทึกขาย')){saleCart=[];updateSaleCart();}};
+  const checkout=panel.querySelector('#sale-cart-checkout');
+  if(checkout) checkout.onclick=async()=>{
+    if(salesBatchBusy||savingStores.size)return;
+    salesBatchBusy=true;
+    try {
+      const rows=copyData(saleCart), preview=prepareSaleRows(rows);
+      const message=preview.sales.map(s=>`${s.desc}\nยอดขาย ${fmtMoney(s.amount)} · รับ ${fmtMoney(s.type==='installment'?s.paidAmount:s.amount)} · ใช้ส่วนตัว ${fmtMoney(personalUseAmount(s))}`).join('\n\n');
+      if(!await showConfirm(`บันทึกขาย ${rows.length} รายการพร้อมกัน?\n\n${message}\n\nตัดสต็อกครั้งเดียวและนำทุกรายการเข้ารอส่ง หากมีรายการใดไม่ถูกต้องจะไม่บันทึกทั้งชุด`))return;
+      await commitSaleRows(rows);
+      saleCart=[];
+      render();
+      toast(`บันทึกขาย ${rows.length} รายการแล้ว · เปิดเมนูรอส่งเพื่อจัดส่งรวม`);
+    } catch(error){if(!error.storageReported)showAlert(error.message);}
+    finally{salesBatchBusy=false;}
+  };
+  updateSaleCartSummary();
+}
+
+function renderAllocationTab() {
+  const sales=activeAccountingTransactions(transactions, preorders).filter(t=>t.category==='ขายสินค้า'&&['income','installment','preorder'].includes(t.type));
+  const total=sales.reduce((n,s)=>n+personalUseAmount(s),0);
+  const receipts=shipments.filter(s=>s.status==='shipped'&&s.allocation);
+  return `<section class="stats">${metric('แผนใช้ส่วนตัวจากยอดขาย',fmtMoney(total),'คิดจากยอดขายเต็ม รวมรายการผ่อน ยังไม่ใช่ยอดถอนจริง','wallet')}${metric('ค้างรับจากการผ่อน',fmtMoney(openInstallments().reduce((n,s)=>n+s.amount-(s.paidAmount||0),0)),'ตรวจเงินรับจริงก่อนแบ่งใช้','clock')}${metric('พัสดุที่มีแผนแบ่งเงิน',receipts.length,'ดูยอดเฉพาะจำนวนที่ส่งแต่ละครั้ง','box')}</section>
+  <section class="panel"><div class="section-heading"><h2>ส่วนตัวและเงินยิงแอด</h2><div class="header-actions"><button class="btn btn-primary" data-go="sell">ตั้งเงินแบ่งตอนขาย</button><button class="btn btn-ghost" data-go="ads">เงินเก็บยิงแอด / เครดิต</button></div></div><p class="hint">ใช้ส่วนตัวคิดจากยอดขายเต็มก่อนหักค่าใช้จ่าย แผนยิงแอดใช้ทั้งบาทต่อชิ้นและเปอร์เซ็นต์กำไรตามค่าของแคมเปญเดิม การแสดงแผนไม่บันทึกถอนเงินหรือเติมเครดิตซ้ำ</p><table><thead><tr><th>วันที่ / รายการ</th><th>ยอดขาย</th><th>ใช้ส่วนตัว</th><th>เก็บยิงแอด</th><th>เงินรับตามรายการ</th></tr></thead><tbody>${sales.map(s=>`<tr><td>${s.date}<br>${escapeHtml(s.desc)}</td><td>${fmtMoney(s.amount)}</td><td>${s.personalUsePercent||0}% · ${fmtMoney(personalUseAmount(s))}</td><td>${s.adReservePerUnit!=null?fmtMoney(s.adReservePerUnit*s.qty):s.adCampaignId?'ตามเปอร์เซ็นต์แคมเปญ':'—'}</td><td>${fmtMoney(s.type==='installment'?s.paidAmount||0:s.amount)}</td></tr>`).join('')||'<tr><td colspan="5">ยังไม่มีรายการขาย</td></tr>'}</tbody></table></section>
+  <section class="panel"><div class="section-heading"><h2>ยอดแบ่งเงิน ณ ตอนส่ง</h2><button class="btn btn-ghost" data-go="shipments">ประวัติพัสดุ / แก้ค่าส่ง</button></div>${receipts.map(s=>`<details class="allocation-history"><summary>${escapeHtml(s.date)} · ${escapeHtml(s.recipient||s.id)} · ${s.items.reduce((n,i)=>n+i.qty,0)} ชิ้น</summary>${renderShipmentAllocation(s.allocation,{esc:escapeHtml,fmt:fmtMoney})}</details>`).join('')||'<p class="hint">เมื่อส่งสินค้าแล้ว ยอดแบ่งเงินของพัสดุจะแสดงที่นี่</p>'}</section>`;
+}
+
+function wireBatchPayments() {
+  const form=document.getElementById('batch-payment-form');if(!form)return;
+  const expected=new Map(openInstallments().map(s=>[s.id,JSON.stringify(s)]));
+  const checks=[...form.querySelectorAll('[name="selected"]')];
+  const rows=()=>checks.filter(c=>c.checked).map(c=>({saleId:c.value,amount:form.elements['amount-'+c.value].value,expectedSale:expected.get(c.value)}));
+  const update=()=>{
+    checks.forEach(c=>form.elements['amount-'+c.value].disabled=!c.checked);
+    const selected=rows(),all=form.querySelector('#batch-payment-all');
+    all.checked=selected.length===checks.length;all.indeterminate=selected.length>0&&selected.length<checks.length;
+    form.querySelector('#batch-payment-submit').disabled=!selected.length;
+    form.querySelector('#batch-payment-summary').textContent=`เลือก ${selected.length} รายการ · รับเงินรวม ${fmtMoney(selected.reduce((n,r)=>n+(Number(r.amount)||0),0))}`;
+  };
+  form.querySelector('#batch-payment-all').onchange=e=>{checks.forEach(c=>c.checked=e.target.checked);update();};
+  form.oninput=e=>{if(e.target.id!=='batch-payment-all')update();};
+  form.onsubmit=async e=>{
+    e.preventDefault();if(paymentsBatchBusy||savingStores.size)return;paymentsBatchBusy=true;
+    try {
+      const selected=rows();prepareInstallmentPayments(transactions,selected,{id:uid,date:todayStr()});
+      if(!await showConfirm(`ยืนยันรับเงินจริง ${selected.length} รายการ รวม ${fmtMoney(selected.reduce((n,r)=>n+Number(r.amount),0))}?\n\n${selected.map(r=>transactions.find(t=>t.id===r.saleId).desc+' · '+fmtMoney(r.amount)).join('\n')}\n\nบันทึกทั้งชุดครั้งเดียว ไม่โอนเงินให้อัตโนมัติ`))return;
+      transactions=prepareInstallmentPayments(transactions,selected,{id:uid,date:todayStr()});
+      await saveTx();render();toast(`รับชำระ ${selected.length} รายการแล้ว`);
+    }catch(error){if(!error.storageReported)showAlert(error.message);}
+    finally{paymentsBatchBusy=false;}
+  };
+  update();
+}
+
+// Edit all still-pending lines of a purchase together; historical snapshots stay intact.
+function renderPurchaseHistory() {
+  const lots=transactions.filter(t=>t.type==='expense' && Array.isArray(t.purchaseItems));
+  return `<h2>ล็อตสั่งซื้อ · เปิดแก้ไขทั้งล็อต</h2><p class="hint">เลือกล็อตเพื่อแก้หลายรายการพร้อมกัน หรือระบุจำนวนรอรับเป็น 0 เพื่อยกเลิกสินค้านั้น</p>${lots.map(tx=>`<details class="receipt-lot"><summary>${escapeHtml(tx.date)} · ${escapeHtml(tx.desc||'สั่งซื้อสินค้า')} <small>ยอดบัญชี ${fmtMoney(tx.amount)}</small></summary><form data-purchase-edit="${escapeHtml(tx.id)}"><p class="hint">ยอดรายจ่ายจะปรับตามจำนวนและต้นทุนส่วนที่รอรับ การบันทึกไม่โอนหรือคืนเงินจริง</p>${tx.purchaseItems.map(item=>{const o=pendingOrders.find(p=>p.id===item.id);return `<fieldset class="purchase-lot-item"><legend>${escapeHtml(pendingLabel(o||item))}</legend><p class="hint">สั่งเดิม ${item.qty} ชิ้น · ${o?'รอรับ '+o.qty+' ชิ้น':'ไม่มีของรอรับ'}</p>${o?`<div class="form-grid"><div class="field"><label>ชื่อสินค้า</label><input name="name-${escapeHtml(o.id)}" value="${escapeHtml(o.name)}" required></div><div class="field"><label>สี</label><input name="color-${escapeHtml(o.id)}" value="${escapeHtml(o.color||'')}"></div><div class="field"><label>ไซซ์</label><input name="size-${escapeHtml(o.id)}" value="${escapeHtml(o.size||'')}"></div><div class="field"><label>จำนวนรอรับ</label><input name="qty-${escapeHtml(o.id)}" type="number" min="0" step="1" value="${o.qty}" required></div><div class="field"><label>ต้นทุนต่อชิ้น</label><input name="cost-${escapeHtml(o.id)}" type="number" min="0" step="0.01" value="${o.cost}" required></div><div class="field"><label>ราคาขายที่ตั้งไว้</label><input name="price-${escapeHtml(o.id)}" type="number" min="0" step="0.01" value="${o.price}" required></div><div class="field"><label>หมายเหตุ</label><input name="note-${escapeHtml(o.id)}" value="${escapeHtml(o.note||'')}" maxlength="500"></div></div>`:''}</fieldset>`;}).join('')}<div class="field"><label>เหตุผลการแก้ไขล็อต</label><input name="reason" required minlength="3" maxlength="500"></div><button class="btn btn-primary" type="submit">ตรวจสอบและบันทึกทั้งล็อต</button>${(tx.purchaseCorrections||[]).map(c=>`<p class="hint">${escapeHtml(c.date)} · ${escapeHtml(c.reason)} · ${escapeHtml(c.summary)}</p>`).join('')}</form></details>`).join('')||'<p class="hint">ยังไม่มีประวัติสั่งซื้อที่มีรายละเอียดล็อต</p>'}`;
+}
+function wirePurchaseHistory() {
+  document.querySelectorAll('[data-purchase-edit]').forEach(form=>{form.onsubmit=async event=>{
+    event.preventDefault();const tx=transactions.find(t=>t.id===form.dataset.purchaseEdit);if(!tx)return;
+    const expected=JSON.stringify([tx,pendingOrders]);const reason=form.elements.reason.value.trim();if(reason.length<3){showAlert('ระบุเหตุผลอย่างน้อย 3 ตัวอักษร');return;}
+    const changes=[];for(const original of tx.purchaseItems){const o=pendingOrders.find(p=>p.id===original.id);if(!o)continue;const val=key=>form.elements[key+'-'+o.id].value.trim();const next={name:val('name'),color:val('color'),size:val('size'),qty:Number(val('qty')),cost:Number(val('cost')),price:Number(val('price')),note:val('note')};
+      if(!next.name||!Number.isSafeInteger(next.qty)||next.qty<0||!validCash(next.cost)||!validCash(next.price)){showAlert('ตรวจสอบชื่อ จำนวน และราคาทุกแถว');return;}
+      if((o.receivedQty||0)>0&&(next.name!==o.name||next.color!==(o.color||'')||next.size!==(o.size||'')||next.cost!==o.cost)){showAlert('รายการที่รับบางส่วนแล้ว แก้ได้เฉพาะจำนวนรอรับ ราคาขาย และหมายเหตุ');return;}
+      if(['name','color','size','qty','cost','price','note'].some(k=>next[k]!==(o[k]??'')))changes.push({id:o.id,before:copyData(o),next});
+    }
+    if(!changes.length){showAlert('ไม่มีข้อมูลที่เปลี่ยนแปลง');return;}
+    const delta=money(changes.reduce((sum,c)=>sum+c.next.qty*c.next.cost-c.before.qty*c.before.cost,0));if(!validCash(money(tx.amount+delta))){showAlert('ยอดรายจ่ายหลังแก้ไขไม่ถูกต้อง');return;}
+    const details=changes.map(c=>`${c.before.name} ${c.before.color||''} ${c.before.size||''}: ${c.before.qty} → ${c.next.qty} ชิ้น · ${fmtMoney(c.before.cost)} → ${fmtMoney(c.next.cost)}/ชิ้น`).join('\n');
+    if(!(await showConfirm(`ยืนยันแก้ไขล็อต ${changes.length} รายการ?\n${details}\nปรับยอดรายจ่าย ${delta>=0?'+':''}${fmtMoney(delta)} · ไม่โอนหรือคืนเงินจริง`)))return;
+    if(expected!==JSON.stringify([transactions.find(t=>t.id===tx.id),pendingOrders])){showAlert('รายการเปลี่ยนแปลง กรุณาเปิดข้อมูลล่าสุด');return;}
+    tx.purchaseCorrections=[...(tx.purchaseCorrections||[]),{date:todayStr(),reason,summary:`ปรับ ${changes.length} รายการ · เปลี่ยนยอด ${delta} บาท`,before:changes.map(c=>c.before),after:changes.map(c=>c.next)}];
+    tx.amount=money(tx.amount+delta);changes.forEach(c=>{const o=pendingOrders.find(p=>p.id===c.id);Object.assign(o,c.next);if(o.productId&&normalizedText(products.find(p=>p.id===o.productId)?.name)!==normalizedText(o.name))delete o.productId;});pendingOrders=pendingOrders.filter(p=>p.qty>0);tx.pendingIds=tx.pendingIds.filter(id=>!changes.some(c=>c.id===id&&c.next.qty===0));
+    try{await saveData('pendingOrders','transactions');render();toast('บันทึกการแก้ไขทั้งล็อตแล้ว');}catch(error){if(!error.storageReported)showAlert(error.message);}
+  };});
 }

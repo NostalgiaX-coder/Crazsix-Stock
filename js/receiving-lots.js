@@ -195,7 +195,14 @@ export function correctReceivingLot(state, data, newId, date, at) {
             pending.originalQty = pending.originalQty ?? pending.qty + (pending.receivedQty || 0);
             pending.qty -= delta;
             pending.receivedQty = receivedElsewhere + item.qty;
-          } else next.pendingOrders.unshift({...restored, qty:-delta, receivedQty:receivedElsewhere + item.qty, originalQty:receivedElsewhere + (previous?.qty || 0)});
+          } else {
+            next.pendingOrders.unshift({...restored, qty:-delta, receivedQty:receivedElsewhere + item.qty, originalQty:receivedElsewhere + (previous?.qty || 0)});
+            // A later receipt correction can return units after the unreceived
+            // remainder was cancelled. Reconnect those units to their original
+            // purchase without charging them a second time.
+            const purchases = next.transactions.filter(t => t.type === 'expense' && Array.isArray(t.pendingIds) && t.purchaseItems?.some(p => p.id === item.id));
+            if (purchases.length === 1 && !purchases[0].pendingIds.includes(item.id)) purchases[0].pendingIds.push(item.id);
+          }
           item.purchase = {...restored, originalQty:pending?.originalQty ?? receivedElsewhere + (previous?.qty || 0)};
         }
       }
